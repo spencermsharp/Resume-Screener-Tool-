@@ -296,3 +296,12 @@ h3 { font-size: 14px; font-weight: 600; }
   padding: 16px;
 }
 .stage-panel label { font-size: 12px; font-weight: 600; color: var(--text2); margin-bottom: 5px; display: block; }
+
+/* ── GLOBAL (shared) TABS ROW ────────────────────────────────────────────── */
+.tabs-global { border-bottom:1px solid var(--border); margin-top:-16px; margin-bottom:20px; align-items:center; }
+.tabs-global-label { font-size:11px; color:var(--text2); text-transform:uppercase; letter-spacing:.05em; padding:0 12px 0 2px; white-space:nowrap; }
+
+/* Future Fit expiring rows + clickable name */
+.ff-expiring td { opacity:.6; }
+.ff-name { cursor:pointer; }
+.ff-name:hover { color:var(--accent); }

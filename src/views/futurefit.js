@@ -1,29 +1,25 @@
-// ── FUTURE FIT ────────────────────────────────────────────────────────────────
-// People who are good but not right for the role right now — parked for later.
-// Scoped to the current workspace. From here you can re-open them against any
-// open position (moves them back into that position's pipeline at Screened).
-import { Profiles, Candidates, Settings, Stages } from '../data/db.js';
+// ── FUTURE FIT (GLOBAL shared pool) ───────────────────────────────────────────
+// One recyclable pool across ALL companies (Vimenture, Qualis, every Kruew
+// client). De-duped by person. Re-open anyone into ANY open position — the app
+// creates a NEW application for that person on the chosen job, keeping history.
+import { Profiles, Candidates, People, Stages } from '../data/db.js';
 import { el, esc, scoreClass, fmtDate } from '../utils.js';
-import { prompt as promptDialog, confirm as confirmDialog } from '../ui/modal.js';
+import { open as openModal } from '../ui/modal.js';
 
 export function renderFutureFit(navigate) {
-  const ws = Settings.workspace();
   const wrap = el('div');
+  const pool = Candidates.futureFitPool(); // global, de-duped by person
 
-  // Positions in this workspace, to resolve which candidates belong here.
-  const wsProfileIds = new Set(Profiles.byWorkspace(ws).map(p => p.id));
-  const parked = Candidates.all()
-    .filter(c => c.stage === 'future_fit' && wsProfileIds.has(c.profileId))
-    .sort((a, b) => (b.result?.score || 0) - (a.result?.score || 0));
+  const banner = el('div', { class: 'banner banner-info' });
+  banner.innerHTML = `♻️ <strong>Future Fit</strong> is one shared pool across all companies. Re-open anyone into any open position — a fresh application is created and their full history is kept.`;
+  wrap.appendChild(banner);
 
   const card = el('div', { class: 'card' });
-  card.appendChild(el('div', { class: 'card-header' }, el('h2', {}, 'Future Fit')));
-  card.appendChild(el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:12px' },
-    'Strong people kept warm for later. Re-open one against any open position when the timing is right.'));
+  card.appendChild(el('div', { class: 'card-header' }, el('h2', {}, `Future Fit pool (${pool.length})`)));
 
-  if (!parked.length) {
+  if (!pool.length) {
     const e = el('div', { class: 'empty' });
-    e.innerHTML = `<div class="big">🌱</div><p>No one parked in Future Fit yet. Move a candidate here from their detail page.</p>`;
+    e.innerHTML = `<div class="big">🌱</div><p>No one parked yet. On a candidate, choose "Future Fit" to keep them for later.</p>`;
     card.appendChild(e);
     wrap.appendChild(card);
     return wrap;
@@ -31,53 +27,91 @@ export function renderFutureFit(navigate) {
 
   const table = el('table');
   table.innerHTML = `<thead><tr>
-    <th style="width:70px">Score</th><th>Candidate</th><th>Originally for</th>
-    <th style="width:120px">Parked</th><th style="width:220px"></th>
+    <th style="width:64px">Score</th><th>Candidate</th><th>Originally for</th>
+    <th style="width:110px">Parked</th><th style="width:230px"></th>
   </tr></thead>`;
   const tb = el('tbody');
 
-  parked.forEach(c => {
+  pool.forEach(c => {
     const prof = Profiles.get(c.profileId);
     const score = c.result?.score ?? 0;
-    const tr = el('tr');
+    const months = monthsSince(c.createdAt);
+    const expiring = months >= 6;
+    const tr = el('tr', { class: expiring ? 'ff-expiring' : '' });
     tr.innerHTML = `
       <td><span class="score-chip ${scoreClass(score)}">${score}</span></td>
-      <td><strong>${esc(c.name)}</strong><div class="muted" style="font-size:12px">${esc(c.parsed?.email || '')}</div></td>
-      <td>${esc(prof?.role || '—')}</td>
-      <td class="muted">${fmtDate(c.createdAt)}</td>`;
+      <td><strong class="ff-name" data-person="${esc(c.personId || '')}">${esc(c.name)}</strong>
+          <div class="muted" style="font-size:12px">${esc(c.parsed?.email || '')}</div></td>
+      <td>${esc(prof?.role || '—')}${prof ? ` <span class="muted">· ${esc(prof.company || prof.workspace || '')}</span>` : ''}</td>
+      <td class="muted">${fmtDate(c.createdAt)}${expiring ? '<div class="badge badge-yellow" style="margin-top:3px">expiring</div>' : ''}</td>`;
     const td = el('td', { style: 'white-space:nowrap' });
     td.appendChild(el('button', { class: 'btn btn-sm', onclick: () => navigate('candidate', c.id) }, 'Open'));
-    td.appendChild(el('button', { class: 'btn btn-sm btn-primary', style: 'margin-left:6px', onclick: () => reopen(c, ws, navigate) }, 'Re-open for role'));
+    td.appendChild(el('button', { class: 'btn btn-sm btn-primary', style: 'margin-left:6px', onclick: () => reopen(c, navigate) }, 'Pull into a role'));
     tr.appendChild(td);
     tb.appendChild(tr);
   });
-
   table.appendChild(tb);
   card.appendChild(table);
   wrap.appendChild(card);
+
+  // Make names open the person's full history (candidate detail).
+  setTimeout(() => {
+    wrap.querySelectorAll('.ff-name').forEach(n => n.addEventListener('click', () => {
+      const pid = n.dataset.person;
+      const first = Candidates.all().find(c => c.personId === pid);
+      if (first) navigate('candidate', first.id);
+    }));
+  }, 0);
   return wrap;
 }
 
-// Move a parked candidate back into an open position's pipeline (at Screened).
-async function reopen(c, ws, navigate) {
-  const openPositions = Profiles.open(ws);
+function monthsSince(dateStr) {
+  if (!dateStr) return 0;
+  const then = new Date(dateStr);
+  if (isNaN(then)) return 0;
+  return Math.max(0, Math.floor((Date.now() - then) / (1000 * 60 * 60 * 24 * 30)));
+}
+
+// Re-open a pooled person into any open position via a clean dropdown modal.
+function reopen(c, navigate) {
+  const openPositions = Profiles.open(); // ALL open positions, any company
+  const body = el('div');
   if (!openPositions.length) {
-    await confirmDialog({ title: 'No open positions', message: 'Create an open position first, then re-open this person into it.', confirmText: 'OK', cancelText: '' });
+    body.innerHTML = `<p class="muted">No open positions. Create one first, then pull this person into it.</p>`;
+    openModal({ title: `Re-open ${c.name}`, body, actions: [{ label: 'OK', value: true, variant: 'primary', isDefault: true, isCancel: true }] });
     return;
   }
-  // Simple picker via prompt listing options (kept lightweight).
-  const choices = openPositions.map((p, i) => `${i + 1}. ${p.role}`).join('\n');
-  const pick = await promptDialog({
-    title: `Re-open ${c.name}`,
-    message: `Type the number of the position to move them into:\n${choices}`,
-    placeholder: '1',
-    confirmText: 'Move',
+  body.innerHTML = `<p class="muted" style="margin-bottom:10px">Pick an open position to move <strong>${esc(c.name)}</strong> into. A new application is created at the Screened stage; their history is kept.</p>`;
+  const sel = el('select', { style: 'width:100%' });
+  openPositions.forEach(p => {
+    const ws = p.workspace === 'staffing' ? 'Kruew' : (p.company || 'Internal');
+    sel.appendChild(el('option', { value: p.id }, `${p.role} — ${ws}`));
   });
-  if (pick == null) return;
-  const idx = parseInt(pick, 10) - 1;
-  const target = openPositions[idx];
-  if (!target) return;
-  Candidates.update(c.id, { profileId: target.id });
-  Candidates.setStage(c.id, 'screened', `Re-opened from Future Fit into ${target.role}.`);
-  navigate('results', target.id);
+  body.appendChild(sel);
+
+  openModal({
+    title: `Re-open ${c.name}`,
+    body,
+    actions: [
+      { label: 'Cancel', value: null, variant: 'ghost', isCancel: true },
+      { label: 'Pull into role', value: 'go', variant: 'primary', isDefault: true },
+    ],
+  }).then(res => {
+    if (res !== 'go') return;
+    const target = Profiles.get(sel.value);
+    if (!target) return;
+    // Create a NEW application for the same person on the chosen job.
+    Candidates.create({
+      personId: c.personId,
+      name: c.name,
+      fileName: c.fileName,
+      profileId: target.id,
+      rawText: c.rawText,
+      pdfUrl: c.pdfUrl,
+      parsed: c.parsed,
+      result: c.result,                 // carry the prior score as a starting point
+      stage: 'screened',
+    });
+    navigate('results', target.id);
+  });
 }

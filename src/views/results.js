@@ -1,5 +1,5 @@
 // ── RESULTS (RANKED) + PIPELINE + CANDIDATE DETAIL VIEW ───────────────────────
-import { Profiles, Candidates, Stages, Settings } from '../data/db.js';
+import { Profiles, Candidates, People, Stages, Settings } from '../data/db.js';
 import { el, esc, fmtDate, scoreClass, scoreLabel } from '../utils.js';
 import { confirm as confirmDialog } from '../ui/modal.js';
 import { renderPipeline } from './pipeline.js';
@@ -171,6 +171,28 @@ export function renderCandidate(navigate, candId) {
   // ── Stage controls (the hiring pipeline) ──────────────────────────────────
   card.appendChild(renderStageControls(c, profile, navigate));
 
+  // ── Candidate history across ALL jobs (the Person profile) ────────────────
+  const otherApps = c.personId ? People.history(c.personId).filter(a => a.id !== c.id) : [];
+  if (otherApps.length) {
+    const histCard = el('div', { class: 'card' });
+    histCard.appendChild(el('div', { class: 'card-header' }, el('h3', {}, `This person's other applications (${otherApps.length})`)));
+    histCard.appendChild(el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:10px' },
+      'Same person, other jobs — across all companies. Full history follows them.'));
+    otherApps.forEach(a => {
+      const ap = Profiles.get(a.profileId);
+      const row = el('div', { class: 'row-between', style: 'padding:8px 0;border-top:1px solid var(--border);cursor:pointer' });
+      row.onclick = () => navigate('candidate', a.id);
+      const where = ap ? `${ap.role} · ${ap.company || (ap.workspace === 'staffing' ? 'Kruew' : 'Internal')}` : '—';
+      row.innerHTML = `
+        <div><strong>${esc(where)}</strong>
+          <div class="muted" style="font-size:12px">${esc(Stages.label(a.stage))} · screened ${fmtDate(a.createdAt)}</div></div>
+        <span class="badge ${stageBadgeClass(a.stage)}">${esc(Stages.label(a.stage))}</span>`;
+      histCard.appendChild(row);
+    });
+    // Append after the main card is in the wrap (deferred below).
+    c._historyCard = histCard;
+  }
+
   // explanation
   const ex = el('div', { class: 'explain' });
   ex.innerHTML = `<strong>Why this ranking:</strong> ${esc(r.explanation || 'No explanation available.')}`;
@@ -182,6 +204,9 @@ export function renderCandidate(navigate, candId) {
   (r.missing || []).forEach(m => chips.appendChild(html(`<span class="chip ${m.required ? 'chip-miss' : ''}">${m.required ? '✗ ' : '· '}${esc(m.label)}<span class="chip-weight">w${m.weight}</span></span>`)));
   card.appendChild(chips);
   wrap.appendChild(card);
+
+  // Cross-job history card (if this person has other applications).
+  if (c._historyCard) wrap.appendChild(c._historyCard);
 
   // Original resume — preview the actual PDF (served from the server, so it
   // survives reloads). Falls back to extracted text when no PDF is stored.

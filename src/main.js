@@ -19,34 +19,36 @@ initDB();
 
 const app = document.getElementById('app');
 
-// Tabs shared by both workspaces (the screening core).
+// Workspace tabs — scoped to the current company (Internal or Kruew).
 const CORE_TABS = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'profiles',  label: 'Job Positions' },
   { id: 'upload',    label: 'Upload & Screen' },
   { id: 'results',   label: 'Results' },
-  { id: 'futurefit', label: 'Future Fit' },
 ];
 // Tabs only Kruew Staffing shows (the revenue/CRM layer).
 const STAFFING_TABS = [
   { id: 'companies',  label: 'Companies' },
   { id: 'placements', label: 'Placements' },
 ];
-// Settings-ish tabs at the end.
-const END_TABS = [
-  { id: 'blacklist', label: 'Blackball' },
+// GLOBAL tabs — shared across ALL companies (not scoped to a workspace).
+const GLOBAL_TABS = [
+  { id: 'futurefit', label: '♻️ Future Fit' },
+  { id: 'blacklist', label: '⛔ Blackball' },
   { id: 'stages',    label: 'Hiring Stages' },
 ];
 
 function tabsForWorkspace(ws) {
-  const base = ws === 'staffing'
-    ? [...CORE_TABS, ...STAFFING_TABS, ...END_TABS]
-    : [...CORE_TABS, ...END_TABS];
-  // Team tab: admins manage users; everyone else gets an Account tab (own password).
-  if (isAdmin()) base.push({ id: 'team', label: 'Team' });
-  else base.push({ id: 'team', label: 'Account' });
+  const base = ws === 'staffing' ? [...CORE_TABS, ...STAFFING_TABS] : [...CORE_TABS];
   return base;
 }
+function globalTabs() {
+  const t = [...GLOBAL_TABS];
+  t.push(isAdmin() ? { id: 'team', label: 'Team' } : { id: 'team', label: 'Account' });
+  return t;
+}
+// All valid tab ids for the current workspace (for route validation).
+function allTabIds(ws) { return [...tabsForWorkspace(ws), ...globalTabs()].map(t => t.id); }
 
 let current = 'dashboard';
 let currentArg = undefined;
@@ -143,19 +145,24 @@ function render(arg) {
 
   const main = el('div', { class: 'main-content' });
 
-  // Nav tabs (workspace-aware)
+  // Nav: workspace tabs (scoped) + a separate GLOBAL tabs row (shared).
   const activeTab = activeTabFor(current);
-  const tabList = tabsForWorkspace(ws);
-  // If the current route isn't valid for this workspace, fall back to dashboard.
-  if (!tabList.some(t => t.id === activeTab) && current !== 'candidate') {
+  if (!allTabIds(ws).includes(activeTab) && current !== 'candidate') {
     current = 'dashboard';
   }
   const tabs = el('div', { class: 'tabs' });
   tabsForWorkspace(ws).forEach(t => {
-    const btn = el('button', { class: `tab-btn${t.id === activeTabFor(current) ? ' active' : ''}`, onclick: () => navigate(t.id) }, t.label);
-    tabs.appendChild(btn);
+    tabs.appendChild(el('button', { class: `tab-btn${t.id === activeTabFor(current) ? ' active' : ''}`, onclick: () => navigate(t.id) }, t.label));
   });
   main.appendChild(tabs);
+
+  // Global shared tabs — visually distinct, not tied to the workspace.
+  const gtabs = el('div', { class: 'tabs tabs-global' });
+  gtabs.appendChild(el('span', { class: 'tabs-global-label' }, 'Shared across all companies:'));
+  globalTabs().forEach(t => {
+    gtabs.appendChild(el('button', { class: `tab-btn${t.id === activeTabFor(current) ? ' active' : ''}`, onclick: () => navigate(t.id) }, t.label));
+  });
+  main.appendChild(gtabs);
 
   // Active view (guarded so a view error shows a message, not a blank page)
   try {

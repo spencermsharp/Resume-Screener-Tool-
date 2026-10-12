@@ -20,6 +20,7 @@ create table if not exists public.app_users (
 -- Application data tables (key/jsonb — mirrors the local model, storage swap).
 create table if not exists public.positions   (id text primary key, data jsonb not null, updated_at timestamptz not null default now());
 create table if not exists public.candidates  (id text primary key, data jsonb not null, updated_at timestamptz not null default now());
+create table if not exists public.people      (id text primary key, data jsonb not null, updated_at timestamptz not null default now());
 create table if not exists public.companies   (id text primary key, data jsonb not null, updated_at timestamptz not null default now());
 create table if not exists public.placements  (id text primary key, data jsonb not null, updated_at timestamptz not null default now());
 create table if not exists public.app_kv      (key text primary key, value jsonb not null, updated_at timestamptz not null default now());
@@ -29,6 +30,7 @@ create table if not exists public.app_kv      (key text primary key, value jsonb
 alter table public.app_users   enable row level security;
 alter table public.positions   enable row level security;
 alter table public.candidates  enable row level security;
+alter table public.people      enable row level security;
 alter table public.companies   enable row level security;
 alter table public.placements  enable row level security;
 alter table public.app_kv      enable row level security;
@@ -36,7 +38,7 @@ alter table public.app_kv      enable row level security;
 do $$
 declare t text;
 begin
-  foreach t in array array['app_users','positions','candidates','companies','placements','app_kv']
+  foreach t in array array['app_users','positions','candidates','people','companies','placements','app_kv']
   loop
     execute format('drop policy if exists "anon full access" on public.%I;', t);
     execute format('create policy "anon full access" on public.%I for all to anon, authenticated using (true) with check (true);', t);

@@ -19,12 +19,13 @@ import { uid, today } from '../utils.js';
 
 const KEYS = {
   profiles: 'qrs_profiles',
-  candidates: 'qrs_candidates',
+  candidates: 'qrs_candidates',   // each candidate = one APPLICATION (person ↔ job)
+  people: 'qrs_people',           // global PERSON records (the recycle anchor)
   settings: 'qrs_settings',
   stages: 'qrs_stages',
-  blacklist: 'qrs_blacklist',   // shared blackball list (both workspaces)
-  companies: 'qrs_companies',   // staffing: client companies
-  placements: 'qrs_placements', // staffing: active hires
+  blacklist: 'qrs_blacklist',     // global blackball list (all companies)
+  companies: 'qrs_companies',     // staffing: client companies
+  placements: 'qrs_placements',   // staffing: active hires
 };
 
 /**
@@ -45,6 +46,7 @@ export const WORKSPACES = {
 const SYNC = {
   [KEYS.profiles]:   { kind: 'collection', table: 'positions' },
   [KEYS.candidates]: { kind: 'collection', table: 'candidates' },
+  [KEYS.people]:     { kind: 'collection', table: 'people' },
   [KEYS.companies]:  { kind: 'collection', table: 'companies' },
   [KEYS.placements]: { kind: 'collection', table: 'placements' },
   [KEYS.stages]:     { kind: 'kv', kvKey: 'stages' },
@@ -253,6 +255,37 @@ export function initDB() {
   if (backend.read(KEYS.blacklist) == null) backend.write(KEYS.blacklist, []);
   if (backend.read(KEYS.companies) == null) backend.write(KEYS.companies, []);
   if (backend.read(KEYS.placements) == null) backend.write(KEYS.placements, []);
+  if (backend.read(KEYS.people) == null) backend.write(KEYS.people, []);
+
+  // Migrate: ensure every candidate (application) is linked to a global Person.
+  // Match existing people by email, else by name, else create a new Person.
+  const allCands = backend.read(KEYS.candidates) || [];
+  let people = backend.read(KEYS.people) || [];
+  let peopleChanged = false, candsChanged = false;
+  const findPerson = (name, email) => {
+    const e = normEmail(email), n = normName(name);
+    return people.find(p => (e && normEmail(p.email) === e) || (n && normName(p.name) === n)) || null;
+  };
+  for (const c of allCands) {
+    if (c.personId) continue;
+    const email = c.parsed?.email || '';
+    let person = findPerson(c.name, email);
+    if (!person) {
+      person = {
+        id: uid('PERSON'),
+        name: c.name || 'Unknown',
+        email,
+        phone: c.parsed?.phone || '',
+        createdAt: c.createdAt || today(),
+      };
+      people.unshift(person);
+      peopleChanged = true;
+    }
+    c.personId = person.id;
+    candsChanged = true;
+  }
+  if (peopleChanged) backend.write(KEYS.people, people);
+  if (candsChanged) backend.write(KEYS.candidates, allCands);
 }
 
 // ── PROFILES REPOSITORY (role definitions — data, not code) ───────────────────
@@ -312,23 +345,76 @@ export const Profiles = {
   margin(p) { return (parseFloat(p.billRate) || 0) - this.payBudgetUsd(p); },
 };
 
+// ── PEOPLE REPOSITORY (global person records — the recycle anchor) ────────────
+/**
+ * A Person is ONE permanent record per human, shared across every workspace and
+ * company. Each job they're considered for is a separate Candidate (application)
+ * linked by personId. This is what makes recycling + full history work.
+ *   Person: { id, name, email, phone, createdAt }
+ */
+export const People = {
+  all() { return backend.read(KEYS.people) || []; },
+  get(id) { return this.all().find(p => p.id === id) || null; },
+  match({ name, email }) {
+    const e = normEmail(email), n = normName(name);
+    return this.all().find(p => (e && normEmail(p.email) === e) || (n && normName(p.name) === n)) || null;
+  },
+  findOrCreate({ name, email, phone }) {
+    const existing = this.match({ name, email });
+    if (existing) {
+      // Backfill missing contact info if this sighting has more.
+      const patch = {};
+      if (!existing.email && email) patch.email = email;
+      if (!existing.phone && phone) patch.phone = phone;
+      if (Object.keys(patch).length) this.update(existing.id, patch);
+      return this.get(existing.id);
+    }
+    const list = this.all();
+    const person = { id: uid('PERSON'), name: name || 'Unknown', email: email || '', phone: phone || '', createdAt: today() };
+    list.unshift(person);
+    backend.write(KEYS.people, list);
+    return person;
+  },
+  update(id, patch) {
+    const list = this.all();
+    const i = list.findIndex(p => p.id === id);
+    if (i === -1) return null;
+    list[i] = { ...list[i], ...patch };
+    backend.write(KEYS.people, list);
+    return list[i];
+  },
+  // Every application (candidate record) for this person, newest first — the
+  // cross-job history log.
+  history(personId) {
+    return (backend.read(KEYS.candidates) || [])
+      .filter(c => c.personId === personId)
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  },
+};
+
 // ── CANDIDATES REPOSITORY ─────────────────────────────────────────────────────
 /**
- * Candidate shape:
- *   { id, name, fileName, profileId, rawText, parsed:{years,skills,...},
- *     result:{score,matched[],missing[],explanation}, status, createdAt }
+ * Candidate = one APPLICATION (a person considered for one job).
+ *   { id, personId, name, fileName, profileId, rawText, parsed, result,
+ *     stage, stageHistory[], createdAt }
  */
 export const Candidates = {
   all() { return backend.read(KEYS.candidates) || []; },
   get(id) { return this.all().find(c => c.id === id) || null; },
   byProfile(profileId) { return this.all().filter(c => c.profileId === profileId); },
   byStage(profileId, stageId) { return this.byProfile(profileId).filter(c => c.stage === stageId); },
+  byPerson(personId) { return this.all().filter(c => c.personId === personId); },
   create(data) {
     const list = this.all();
     const stamp = new Date().toISOString();
     const startStage = data.stage || 'screened';
+    // Link (or create) the global Person this application belongs to.
+    const person = data.personId
+      ? People.get(data.personId)
+      : People.findOrCreate({ name: data.name || data.fileName, email: data.parsed?.email, phone: data.parsed?.phone });
     const cand = {
       id: uid('CAND'),
+      personId: person ? person.id : null,
       name: data.name || data.fileName || 'Unknown Candidate',
       fileName: data.fileName || '',
       profileId: data.profileId || null,
@@ -372,6 +458,18 @@ export const Candidates = {
     backend.write(KEYS.candidates, this.all().filter(c => c.profileId !== profileId));
   },
   clearAll() { backend.write(KEYS.candidates, []); },
+
+  // GLOBAL Future Fit pool — everyone parked, across ALL workspaces/companies.
+  // De-duped by person (a person shows once even if parked from multiple jobs).
+  futureFitPool() {
+    const parked = this.all().filter(c => c.stage === 'future_fit');
+    const byPerson = {};
+    for (const c of parked) {
+      const key = c.personId || c.id;
+      if (!byPerson[key] || String(c.createdAt) > String(byPerson[key].createdAt)) byPerson[key] = c;
+    }
+    return Object.values(byPerson).sort((a, b) => (b.result?.score || 0) - (a.result?.score || 0));
+  },
 };
 
 // ── STAGES REPOSITORY (hiring pipeline — configurable, ordered) ───────────────
