@@ -108,6 +108,10 @@ function reopen(c, navigate) {
     if (res !== 'go') return;
     const target = Profiles.get(sel.value);
     if (!target) return;
+    // Guard: if this person already has an application on the target job, don't
+    // create a duplicate — just jump to that job's results.
+    const dupe = Candidates.byProfile(target.id).find(x => x.personId && x.personId === c.personId);
+    if (dupe) { navigate('results', target.id); return; }
     // Create a NEW application for the same person on the chosen job.
     Candidates.create({
       personId: c.personId,

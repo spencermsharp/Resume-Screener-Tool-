@@ -49,8 +49,10 @@ const SYNC = {
   [KEYS.people]:     { kind: 'collection', table: 'people' },
   [KEYS.companies]:  { kind: 'collection', table: 'companies' },
   [KEYS.placements]: { kind: 'collection', table: 'placements' },
+  // Blacklist is a per-ROW collection (not a blob) so concurrent adds/removes
+  // from different devices can't clobber each other — safety-critical list.
+  [KEYS.blacklist]:  { kind: 'collection', table: 'blacklist' },
   [KEYS.stages]:     { kind: 'kv', kvKey: 'stages' },
-  [KEYS.blacklist]:  { kind: 'kv', kvKey: 'blacklist' },
   // NOTE: settings (current workspace, AI toggle) are deliberately NOT synced —
   // they're per-device UI state, not shared data.
 };
@@ -88,13 +90,21 @@ const backend = {
       const changed = [];
       const prevById = {};
       prevList.forEach(x => { prevById[String(x.id)] = x; });
+      const stamp = new Date().toISOString();
       for (const item of list) {
         const before = prevById[String(item.id)];
         if (!before || JSON.stringify(before) !== JSON.stringify(item)) {
-          changed.push({ id: String(item.id), data: item, updated_at: new Date().toISOString() });
+          // Record a local revision time so the pull can do per-record
+          // last-write-wins and never overwrite a fresher local edit.
+          item._rev = stamp;
+          changed.push({ id: String(item.id), data: item, updated_at: stamp });
         }
       }
-      if (changed.length) enqueueUpsert(cfg.table, changed, cfg.table);
+      if (changed.length) {
+        // Persist the _rev stamps we just set back into the local cache.
+        localStorage.setItem(key, JSON.stringify(list));
+        enqueueUpsert(cfg.table, changed, cfg.table);
+      }
       for (const old of prevList) {
         if (!nextIds.has(String(old.id))) enqueueDelete(cfg.table, String(old.id), 'id', cfg.table);
       }
@@ -137,17 +147,30 @@ const backend = {
         }
         continue;
       }
-      // Protect items with pending local writes from being overwritten.
-      const p = pend[cfg.table];
-      let merged = serverItems;
-      if (p && (p.upsert.size || p.del.size)) {
-        const localList = this.read(lsKey) || [];
-        const localById = {}; localList.forEach(x => { localById[String(x.id)] = x; });
-        merged = serverItems
-          .filter(x => !p.del.has(String(x.id)))
-          .map(x => p.upsert.has(String(x.id)) && localById[String(x.id)] ? localById[String(x.id)] : x);
-        p.upsert.forEach(id => { if (localById[id] && !merged.some(x => String(x.id) === id)) merged.push(localById[id]); });
+      // Merge server with local using per-record last-write-wins:
+      //  - keep local copy if it has pending (un-synced) writes, OR
+      //  - keep local copy if its _rev is newer than the server row (a local
+      //    edit that hasn't round-tripped yet), otherwise take the server copy.
+      const p = pend[cfg.table] || { upsert: new Set(), del: new Set() };
+      const localList = this.read(lsKey) || [];
+      const localById = {}; localList.forEach(x => { localById[String(x.id)] = x; });
+      const merged = [];
+      for (const srv of serverItems) {
+        const id = String(srv.id);
+        if (p.del.has(id)) continue;                      // locally deleted, pending
+        const loc = localById[id];
+        if (loc && p.upsert.has(id)) { merged.push(loc); continue; }  // pending edit wins
+        if (loc && loc._rev && (!srv._rev || loc._rev > srv._rev)) { merged.push(loc); continue; } // fresher local wins
+        merged.push(srv);
       }
+      // Re-add local-only records ONLY if they have a pending upload (brand-new,
+      // still syncing). A local-only record with no pending write was deleted on
+      // another device, so we must NOT resurrect it.
+      localList.forEach(loc => {
+        const id = String(loc.id);
+        if (merged.some(x => String(x.id) === id)) return;
+        if (p.upsert.has(id)) merged.push(loc);
+      });
       localStorage.setItem(lsKey, JSON.stringify(merged));
     }
   },
@@ -271,7 +294,8 @@ export function initDB() {
   let peopleChanged = false, candsChanged = false;
   const findPerson = (name, email) => {
     const e = normEmail(email), n = normName(name);
-    return people.find(p => (e && normEmail(p.email) === e) || (n && normName(p.name) === n)) || null;
+    if (e) return people.find(p => normEmail(p.email) === e) || null;
+    return people.find(p => !p.email && n && normName(p.name) === n) || null;
   };
   for (const c of allCands) {
     if (c.personId) continue;
@@ -364,7 +388,10 @@ export const People = {
   get(id) { return this.all().find(p => p.id === id) || null; },
   match({ name, email }) {
     const e = normEmail(email), n = normName(name);
-    return this.all().find(p => (e && normEmail(p.email) === e) || (n && normName(p.name) === n)) || null;
+    // Email is the identity key (people can share a name). Only fall back to a
+    // name match when neither side has an email to compare.
+    if (e) return this.all().find(p => normEmail(p.email) === e) || null;
+    return this.all().find(p => !p.email && n && normName(p.name) === n) || null;
   },
   findOrCreate({ name, email, phone }) {
     const existing = this.match({ name, email });
@@ -609,10 +636,14 @@ export const Blacklist = {
     return entry;
   },
   remove(id) { backend.write(KEYS.blacklist, this.all().filter(e => e.id !== id)); },
-  // Returns the matching blacklist entry for a parsed candidate, or null.
+  // Match a candidate against the blacklist. EMAIL is the identity key (people
+  // can share a name), so we match by email first. Name is only a fallback when
+  // the candidate has no email AND the blacklist entry has no email.
   match({ name, email }) {
-    const n = normName(name), e = normEmail(email);
-    return this.all().find(b => (e && normEmail(b.email) === e) || (n && normName(b.name) === n)) || null;
+    const e = normEmail(email), n = normName(name);
+    if (e) return this.all().find(b => normEmail(b.email) === e) || null;
+    // No email on the candidate — fall back to name against entries without email.
+    return this.all().find(b => !b.email && n && normName(b.name) === n) || null;
   },
 };
 
