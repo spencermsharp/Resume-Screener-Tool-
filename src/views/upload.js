@@ -4,19 +4,27 @@ import { extractText, lightStructure } from '../data/parser.js';
 import { screenCandidate } from '../data/screener.js';
 import { el, esc } from '../utils.js';
 
-// Store a resume PDF in Supabase Storage (bucket: 'resumes') and return a public
-// URL for preview. If Supabase isn't configured, returns '' (text still screens).
+// Store a resume PDF in Supabase Storage (bucket: 'resumes') via REST and return
+// a public URL for preview. If Supabase isn't configured, returns '' (text still
+// screens — preview is best-effort).
 async function storePdf(file) {
-  const { getClient, isConfigured } = await import('../auth/supabaseClient.js');
+  const { getConfig, isConfigured } = await import('../auth/supabaseClient.js');
   if (!isConfigured()) return '';
-  const sb = await getClient();
+  const { supabaseUrl, supabaseAnonKey } = getConfig();
   const name = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.pdf`;
-  const { error } = await sb.storage.from('resumes').upload(name, file, {
-    contentType: 'application/pdf', upsert: false,
-  });
-  if (error) return '';
-  const { data } = sb.storage.from('resumes').getPublicUrl(name);
-  return (data && data.publicUrl) || '';
+  try {
+    const r = await fetch(`${supabaseUrl}/storage/v1/object/resumes/${name}`, {
+      method: 'POST',
+      headers: {
+        apikey: supabaseAnonKey,
+        Authorization: `Bearer ${supabaseAnonKey}`,
+        'Content-Type': 'application/pdf',
+      },
+      body: file,
+    });
+    if (!r.ok) return '';
+    return `${supabaseUrl}/storage/v1/object/public/resumes/${name}`;
+  } catch { return ''; }
 }
 
 export function renderUpload(navigate) {

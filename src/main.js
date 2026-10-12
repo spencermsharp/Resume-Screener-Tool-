@@ -42,10 +42,9 @@ function tabsForWorkspace(ws) {
   const base = ws === 'staffing'
     ? [...CORE_TABS, ...STAFFING_TABS, ...END_TABS]
     : [...CORE_TABS, ...END_TABS];
-  // Team tab: shown to admins (cloud mode). In local mode everyone is admin,
-  // but there's no real user management, so only show it when cloud-configured.
-  if (isConfigured() && isAdmin()) base.push({ id: 'team', label: 'Team' });
-  else if (isConfigured()) base.push({ id: 'team', label: 'Account' });
+  // Team tab: admins manage users; everyone else gets an Account tab (own password).
+  if (isAdmin()) base.push({ id: 'team', label: 'Team' });
+  else base.push({ id: 'team', label: 'Account' });
   return base;
 }
 

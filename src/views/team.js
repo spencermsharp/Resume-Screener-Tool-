@@ -3,20 +3,10 @@
 // in-app via the admin-users Edge Function — no email, no Supabase dashboard.
 import { el, esc } from '../utils.js';
 import { currentUser, isAdmin, Users, changeOwnPassword } from '../auth/auth.js';
-import { isConfigured } from '../auth/supabaseClient.js';
 import { confirm as confirmDialog, prompt as promptDialog, alert as alertDialog } from '../ui/modal.js';
 
 export function renderTeam(navigate) {
   const wrap = el('div');
-
-  if (!isConfigured()) {
-    const card = el('div', { class: 'card' });
-    const b = el('div', { class: 'banner banner-warn' });
-    b.innerHTML = `👥 Team management is available once the app is connected to the cloud (Supabase). In local mode there are no logins. See <code>CLOUD-SETUP.md</code>.`;
-    card.appendChild(b);
-    wrap.appendChild(card);
-    return wrap;
-  }
 
   if (!isAdmin()) {
     // Non-admins can still change their own password here.
