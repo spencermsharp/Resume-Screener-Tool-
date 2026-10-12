@@ -4,6 +4,21 @@ import { extractText, lightStructure } from '../data/parser.js';
 import { screenCandidate } from '../data/screener.js';
 import { el, esc } from '../utils.js';
 
+// Store a resume PDF in Supabase Storage (bucket: 'resumes') and return a public
+// URL for preview. If Supabase isn't configured, returns '' (text still screens).
+async function storePdf(file) {
+  const { getClient, isConfigured } = await import('../auth/supabaseClient.js');
+  if (!isConfigured()) return '';
+  const sb = await getClient();
+  const name = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.pdf`;
+  const { error } = await sb.storage.from('resumes').upload(name, file, {
+    contentType: 'application/pdf', upsert: false,
+  });
+  if (error) return '';
+  const { data } = sb.storage.from('resumes').getPublicUrl(name);
+  return (data && data.publicUrl) || '';
+}
+
 export function renderUpload(navigate) {
   const profiles = Profiles.open(Settings.workspace());
   const wrap = el('div');
@@ -277,12 +292,7 @@ export function renderUpload(navigate) {
           let pdfUrl = '';
           const isPdfFile = item.file && (item.file.type === 'application/pdf' || /\.pdf$/i.test(item.file.name || ''));
           if (isPdfFile) {
-            try {
-              const fd = new FormData();
-              fd.append('file', item.file, item.file.name || 'resume.pdf');
-              const up = await fetch('/api/upload', { method: 'POST', body: fd });
-              if (up.ok) { const j = await up.json(); pdfUrl = j.url || ''; }
-            } catch { /* preview is best-effort; text still screened */ }
+            try { pdfUrl = await storePdf(item.file); } catch { /* preview is best-effort */ }
           }
 
           const cand = Candidates.create({

@@ -106,3 +106,22 @@ begin
     );
   end loop;
 end$$;
+
+-- ------------------------------------------------------------
+-- Storage bucket for resume PDFs (preview on candidate detail).
+-- Public read so the <iframe> can display them; authenticated upload.
+-- ------------------------------------------------------------
+insert into storage.buckets (id, name, public)
+values ('resumes', 'resumes', true)
+on conflict (id) do nothing;
+
+drop policy if exists "resumes public read" on storage.objects;
+create policy "resumes public read"
+  on storage.objects for select
+  using (bucket_id = 'resumes');
+
+drop policy if exists "resumes auth upload" on storage.objects;
+create policy "resumes auth upload"
+  on storage.objects for insert
+  to authenticated
+  with check (bucket_id = 'resumes');

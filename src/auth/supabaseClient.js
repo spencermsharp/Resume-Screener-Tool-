@@ -12,13 +12,21 @@ let _client = null;
 let _config = null;
 let _configPromise = null;
 
-// Fetch runtime config once (Supabase URL + anon key + whether configured).
+// Load config. Static-site friendly: reads window.APP_CONFIG injected by
+// public/config.js (the Supabase URL + anon key — both safe to expose).
+// Falls back to the Flask /api/config if present (local dev with the server).
 export function loadConfig() {
   if (_configPromise) return _configPromise;
+  const fromWindow = (typeof window !== 'undefined' && window.APP_CONFIG) ? window.APP_CONFIG : null;
+  if (fromWindow && fromWindow.supabaseUrl) {
+    _config = fromWindow;
+    _configPromise = Promise.resolve(_config);
+    return _configPromise;
+  }
   _configPromise = fetch('/api/config')
     .then(r => r.ok ? r.json() : {})
-    .then(cfg => { _config = cfg || {}; return _config; })
-    .catch(() => { _config = {}; return _config; });
+    .then(cfg => { _config = cfg || fromWindow || {}; return _config; })
+    .catch(() => { _config = fromWindow || {}; return _config; });
   return _configPromise;
 }
 

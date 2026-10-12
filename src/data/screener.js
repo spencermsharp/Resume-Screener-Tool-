@@ -245,19 +245,14 @@ export async function screenWithAI(resumeText, profile) {
   };
   if (ai.model) body.model = ai.model;
 
-  const resp = await fetch('/api/screen', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  // Call the Supabase Edge Function 'screen' (key stays server-side).
+  const { getClient, isConfigured } = await import('../auth/supabaseClient.js');
+  if (!isConfigured()) throw new Error('AI needs the cloud (Supabase) configured.');
+  const sb = await getClient();
+  const { data, error } = await sb.functions.invoke('screen', { body });
+  if (error) throw new Error(error.message || 'AI request failed');
+  if (data && data.error) throw new Error(data.error);
 
-  if (!resp.ok) {
-    let msg = `AI proxy returned ${resp.status}`;
-    try { const j = await resp.json(); if (j.error) msg = j.error; } catch { /* ignore */ }
-    throw new Error(msg);
-  }
-
-  const data = await resp.json();
   const parsed = parseModelJson(data.text);
   return normalizeResult(parsed, resumeText);
 }
