@@ -327,3 +327,21 @@ h3 { font-size: 14px; font-weight: 600; }
 /* Highlighted KPI (e.g. hires-from-Future-Fit ROI) */
 .kpi-highlight { border-color: var(--green); }
 .kpi-highlight .value { color: var(--green); }
+
+/* ── PIPELINE SUMMARY (funnel) ───────────────────────────────────────────── */
+.pf-row { border-bottom: 1px solid var(--border); }
+.pf-row:last-child { border-bottom: none; }
+.pf-head { display: flex; align-items: center; gap: 14px; padding: 12px 4px; cursor: pointer; }
+.pf-head:hover { background: rgba(255,255,255,.02); }
+.pf-label { width: 200px; font-weight: 600; font-size: 13px; flex: 0 0 auto; }
+.pf-track { flex: 1; height: 20px; background: var(--surface2); border-radius: 6px; overflow: hidden; }
+.pf-fill { height: 100%; border-radius: 6px; min-width: 2px; transition: width .25s ease; }
+.pf-fill.pf-blue { background: #3b82f6; } .pf-fill.pf-orange { background: var(--accent); }
+.pf-fill.pf-yellow { background: var(--yellow); } .pf-fill.pf-green { background: var(--green); }
+.pf-fill.pf-red { background: var(--red); } .pf-fill.pf-gray { background: var(--text2); }
+.pf-count { width: 36px; text-align: right; font-weight: 700; font-size: 15px; flex: 0 0 auto; }
+.pf-caret { width: 16px; color: var(--text2); flex: 0 0 auto; }
+.pf-people { padding: 4px 0 12px 24px; }
+.pf-person { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+.pf-person:hover { background: var(--surface2); }
+@media (max-width: 600px) { .pf-label { width: 120px; } }
