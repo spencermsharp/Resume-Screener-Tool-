@@ -4,7 +4,7 @@
 // creates a NEW application for that person on the chosen job, keeping history.
 import { Profiles, Candidates, People, Stages } from '../data/db.js';
 import { el, esc, scoreClass, fmtDate } from '../utils.js';
-import { open as openModal } from '../ui/modal.js';
+import { open as openModal, confirm as confirmDialog } from '../ui/modal.js';
 
 export function renderFutureFit(navigate) {
   const wrap = el('div');
@@ -47,6 +47,14 @@ export function renderFutureFit(navigate) {
     const td = el('td', { style: 'white-space:nowrap' });
     td.appendChild(el('button', { class: 'btn btn-sm', onclick: () => navigate('candidate', c.id) }, 'Open'));
     td.appendChild(el('button', { class: 'btn btn-sm btn-primary', style: 'margin-left:6px', onclick: () => reopen(c, navigate) }, 'Pull into a role'));
+    td.appendChild(el('button', { class: 'btn btn-sm btn-danger', style: 'margin-left:6px', onclick: async () => {
+      const ok = await confirmDialog({
+        title: `Remove ${c.name} from Future Fit?`,
+        message: 'They’ll be dropped from the recyclable pool. This removes this parked application.',
+        confirmText: 'Remove', cancelText: 'Cancel', danger: true,
+      });
+      if (ok) { Candidates.remove(c.id); navigate('futurefit'); }
+    } }, 'Remove'));
     tr.appendChild(td);
     tb.appendChild(tr);
   });
