@@ -132,8 +132,21 @@ export const Users = {
 
   create({ username, name, password, role }) {
     const list = this.all();
-    if (list.some(u => u.username === username)) throw new Error('That username is taken.');
-    const u = { id: uid(), username, name: name || username, role: role === 'admin' ? 'admin' : 'user',
+    const uname = String(username || '').trim();
+    const existing = list.find(u => String(u.username || '').toLowerCase() === uname.toLowerCase());
+    if (existing) {
+      // If a same-username record exists but is disabled, reactivate it with the
+      // new details instead of blocking (fixes "username taken" for hidden users).
+      if (existing.status === 'disabled') {
+        const i = list.findIndex(u => u.id === existing.id);
+        list[i] = { ...existing, name: name || existing.name, role: role === 'admin' ? 'admin' : 'user',
+          passwordHash: hashPassword(password), passwordPlain: password, status: 'active' };
+        lsSave(LS_USERS, list); sbUpsertUser(list[i]);
+        return Promise.resolve(list[i]);
+      }
+      throw new Error('That username is taken.');
+    }
+    const u = { id: uid(), username: uname, name: name || uname, role: role === 'admin' ? 'admin' : 'user',
       passwordHash: hashPassword(password), passwordPlain: password, status: 'active' };
     list.push(u); lsSave(LS_USERS, list); sbUpsertUser(u);
     return Promise.resolve(u);
