@@ -275,11 +275,12 @@ h3 { font-size: 14px; font-weight: 600; }
 /* Kruew logo is transparent with dark text — sit it on a white chip so it's
    visible in both light and dark themes, and size it to match the others. */
 .brand-logo-kruew {
-  height: 30px;
+  height: 42px;
   background: #fff;
   padding: 6px 12px;
   border-radius: 8px;
   box-shadow: 0 1px 3px rgba(0,0,0,.15);
+  box-sizing: content-box;
 }
 .brand-plus { color: var(--text2); font-size: 20px; font-weight: 300; line-height: 1; }
 .brand-text { font-size: 18px; font-weight: 700; color: var(--text); letter-spacing: .02em; }
