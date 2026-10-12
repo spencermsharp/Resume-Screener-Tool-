@@ -1,13 +1,16 @@
 // ── RESULTS (RANKED) + PIPELINE + CANDIDATE DETAIL VIEW ───────────────────────
-import { Profiles, Candidates, People, Stages, Settings } from '../data/db.js';
+import { Profiles, Candidates, People, Stages, Settings, REJECT_REASONS } from '../data/db.js';
 import { el, esc, fmtDate, scoreClass, scoreLabel } from '../utils.js';
-import { confirm as confirmDialog } from '../ui/modal.js';
+import { confirm as confirmDialog, open as openModal } from '../ui/modal.js';
+import { currentUser } from '../auth/auth.js';
 import { renderPipeline } from './pipeline.js';
 
 // Remember the last-used sub-view (ranked list vs pipeline board) per session.
 let resultsView = 'ranked';
 // Active filter: 'active' = still in the running; 'all' = everyone screened.
 let resultsFilter = 'active';
+// Compare selection (candidate ids) — session-scoped.
+let compareSel = new Set();
 
 // Maps a stage kind to a badge color class.
 function stageBadgeClass(stageId) {
@@ -93,14 +96,30 @@ function renderRankedList(cands, profile, navigate) {
     `${cands.length} screened · ranked best-first · threshold ${threshold}%. First-level screen — a human makes the final call.`);
   card.appendChild(sub);
 
+  // Compare bar — appears when candidates are selected.
+  const selValid = [...compareSel].filter(id => cands.some(c => c.id === id));
+  compareSel = new Set(selValid);
+  if (compareSel.size) {
+    const bar = el('div', { class: 'compare-bar' });
+    bar.appendChild(el('span', {}, `${compareSel.size} selected to compare`));
+    const right = el('div', { style: 'display:flex;gap:8px' });
+    right.appendChild(el('button', { class: 'btn btn-sm btn-ghost', onclick: () => { compareSel.clear(); navigate('results', profile.id); } }, 'Clear'));
+    const cmpBtn = el('button', { class: 'btn btn-sm btn-primary', onclick: () => openCompare([...compareSel], profile) }, 'Compare →');
+    if (compareSel.size < 2) cmpBtn.disabled = true;
+    right.appendChild(cmpBtn);
+    bar.appendChild(right);
+    card.appendChild(bar);
+  }
+
   const table = el('table', { class: 'rank-table' });
   table.innerHTML = `<thead><tr>
-    <th style="width:48px">#</th>
+    <th style="width:34px"></th>
+    <th style="width:40px">#</th>
     <th style="width:150px">Score</th>
     <th>Candidate</th>
     <th style="width:170px">Stage</th>
-    <th style="width:70px">Years</th>
-    <th style="width:70px"></th>
+    <th style="width:60px">Years</th>
+    <th style="width:64px"></th>
   </tr></thead>`;
   const tb = el('tbody');
 
@@ -111,12 +130,25 @@ function renderRankedList(cands, profile, navigate) {
     const totalN = matchedN + (r.missing || []).length;
     const missReq = (r.missing || []).filter(m => m.required).length;
 
-    const tr = el('tr', { style: 'cursor:pointer', onclick: () => navigate('candidate', c.id) });
-
+    const tr = el('tr');
     const fitBits = [`${matchedN}/${totalN} criteria`];
     if (missReq) fitBits.push(`${missReq} required missing`);
 
-    tr.innerHTML = `
+    // Compare checkbox (max 4).
+    const cbTd = el('td');
+    const cb = el('input', { type: 'checkbox' });
+    cb.checked = compareSel.has(c.id);
+    cb.onclick = (e) => {
+      e.stopPropagation();
+      if (cb.checked) { if (compareSel.size >= 4) { cb.checked = false; return; } compareSel.add(c.id); }
+      else compareSel.delete(c.id);
+      navigate('results', profile.id);
+    };
+    cbTd.appendChild(cb);
+    tr.appendChild(cbTd);
+
+    const rest = el('td', { style: 'display:none' }); // placeholder to keep innerHTML approach simple
+    tr.insertAdjacentHTML('beforeend', `
       <td class="rank-num">#${i + 1}</td>
       <td>
         <div class="score-row">
@@ -124,16 +156,18 @@ function renderRankedList(cands, profile, navigate) {
           <div class="score-track"><div class="score-fill ${scoreClass(r.score)}" style="width:${Math.max(0, Math.min(100, r.score))}%"></div></div>
         </div>
       </td>
-      <td>
+      <td class="c-name" style="cursor:pointer">
         <strong>${esc(c.name)}</strong>
         ${below ? '<span class="badge badge-red" style="margin-left:6px">Below threshold</span>' : ''}
         <div class="muted" style="font-size:12px">${esc(fitBits.join(' · '))}</div>
       </td>
       <td><span class="badge ${stageBadgeClass(c.stage)}">${esc(Stages.label(c.stage))}</span></td>
-      <td>${c.parsed && c.parsed.years != null ? c.parsed.years : '—'}</td>`;
+      <td>${c.parsed && c.parsed.years != null ? c.parsed.years : '—'}</td>`);
     const td = el('td');
     td.appendChild(el('button', { class: 'btn btn-sm', onclick: (e) => { e.stopPropagation(); navigate('candidate', c.id); } }, 'Open'));
     tr.appendChild(td);
+    // Clicking the name/row opens the candidate.
+    tr.querySelector('.c-name').addEventListener('click', () => navigate('candidate', c.id));
     tb.appendChild(tr);
   });
 
@@ -219,6 +253,9 @@ export function renderCandidate(navigate, candId) {
 
   // Cross-job history card (if this person has other applications).
   if (c._historyCard) wrap.appendChild(c._historyCard);
+
+  // Team notes.
+  wrap.appendChild(renderNotes(c, navigate));
 
   // Original resume — preview the actual PDF (served from the server, so it
   // survives reloads). Falls back to extracted text when no PDF is stored.
@@ -307,6 +344,9 @@ function renderStageControls(c, profile, navigate) {
     navigate('candidate', c.id);
   } }, 'Update stage');
   moveRow.appendChild(moveBtn);
+
+  // Reject with a structured reason.
+  moveRow.appendChild(el('button', { class: 'btn btn-danger', onclick: () => rejectWithReason(c, navigate) }, 'Reject with reason'));
   box.appendChild(moveRow);
 
   // Stage history timeline.
@@ -327,6 +367,102 @@ function renderStageControls(c, profile, navigate) {
   }
 
   return box;
+}
+
+// Side-by-side comparison of selected candidates (by criterion).
+function openCompare(ids, profile) {
+  const cands = ids.map(id => Candidates.get(id)).filter(Boolean);
+  const criteria = profile.criteria || [];
+  const body = el('div', { style: 'overflow-x:auto' });
+
+  const matchedSet = c => new Set((c.result?.matched || []).map(m => m.label));
+  const missingReqSet = c => new Set((c.result?.missing || []).filter(m => m.required).map(m => m.label));
+
+  let html = '<table class="cmp-table"><thead><tr><th>Criterion</th>';
+  cands.forEach(c => { html += `<th>${esc(c.name)}<div class="muted" style="font-weight:400">score ${c.result?.score ?? 0}</div></th>`; });
+  html += '</tr></thead><tbody>';
+
+  criteria.forEach(crit => {
+    html += `<tr><td>${esc(crit.label)}${crit.required ? ' <span class="muted">(req)</span>' : ''} <span class="muted">w${crit.weight || 1}</span></td>`;
+    cands.forEach(c => {
+      const has = matchedSet(c).has(crit.label);
+      const missReq = missingReqSet(c).has(crit.label);
+      html += `<td class="${has ? 'cmp-yes' : (missReq ? 'cmp-no' : 'cmp-dim')}">${has ? '✓' : (missReq ? '✗ missing' : '·')}</td>`;
+    });
+    html += '</tr>';
+  });
+  // Years row.
+  html += '<tr><td>Years detected</td>';
+  cands.forEach(c => { html += `<td>${c.parsed?.years != null ? c.parsed.years : '—'}</td>`; });
+  html += '</tr>';
+  // AI explanation row.
+  html += '<tr><td>AI take</td>';
+  cands.forEach(c => { html += `<td style="font-size:12px;color:var(--text2);min-width:180px">${esc((c.result?.explanation || '').split('First-level')[0] || '—')}</td>`; });
+  html += '</tr></tbody></table>';
+  body.innerHTML = html;
+
+  openModal({
+    title: `Compare ${cands.length} candidates`,
+    body,
+    actions: [{ label: 'Close', value: true, variant: 'primary', isDefault: true, isCancel: true }],
+  });
+}
+
+// Reject modal with a structured reason dropdown + optional note.
+function rejectWithReason(c, navigate) {
+  const body = el('div');
+  body.innerHTML = `<p class="muted" style="margin-bottom:10px">Pick a reason — it's searchable later and feeds Future Fit matching.</p>`;
+  const sel = el('select', { style: 'width:100%;margin-bottom:10px' });
+  REJECT_REASONS.forEach(r => sel.appendChild(el('option', { value: r }, r)));
+  body.appendChild(sel);
+  const note = el('input', { type: 'text', placeholder: 'Optional note (e.g. "strong, wrong seniority")', style: 'width:100%' });
+  body.appendChild(note);
+  const hint = el('div', { class: 'muted', style: 'font-size:12px;margin-top:8px' }, '');
+  const syncHint = () => { hint.textContent = sel.value === 'Better fit for another role' ? '→ This will park them in Future Fit (not a hard reject).' : '→ This moves them to Rejected (out of this role).'; };
+  sel.addEventListener('change', syncHint); syncHint();
+  body.appendChild(hint);
+
+  openModal({
+    title: `Reject ${c.name}?`,
+    body,
+    actions: [
+      { label: 'Cancel', value: null, variant: 'ghost', isCancel: true },
+      { label: 'Confirm', value: 'go', variant: 'danger', isDefault: true },
+    ],
+  }).then(res => {
+    if (res !== 'go') return;
+    Candidates.reject(c.id, sel.value, note.value.trim());
+    navigate('candidate', c.id);
+  });
+}
+
+// Team notes — a running comment thread, separate from stage history.
+function renderNotes(c, navigate) {
+  const card = el('div', { class: 'card' });
+  card.appendChild(el('div', { class: 'card-header' }, el('h3', {}, 'Team notes')));
+  const notes = Array.isArray(c.notes) ? c.notes : [];
+  if (!notes.length) {
+    card.appendChild(el('div', { class: 'muted', style: 'font-size:13px;margin-bottom:10px' }, 'No notes yet.'));
+  } else {
+    [...notes].reverse().forEach(n => {
+      const row = el('div', { class: 'note-item' });
+      row.innerHTML = `${esc(n.text)}<div class="note-meta">${esc(n.author || 'someone')} · ${fmtDateTime(n.at)}</div>`;
+      card.appendChild(row);
+    });
+  }
+  const row = el('div', { style: 'display:flex;gap:8px;margin-top:10px' });
+  const input = el('input', { type: 'text', placeholder: 'Add a note for the team…', style: 'flex:1' });
+  const add = () => {
+    if (!input.value.trim()) return;
+    const u = currentUser();
+    Candidates.addNote(c.id, input.value.trim(), u ? u.name : '');
+    navigate('candidate', c.id);
+  };
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') add(); });
+  row.appendChild(input);
+  row.appendChild(el('button', { class: 'btn btn-primary btn-sm', onclick: add }, 'Add'));
+  card.appendChild(row);
+  return card;
 }
 
 function fmtDateTime(iso) {

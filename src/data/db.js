@@ -453,6 +453,23 @@ export const Candidates = {
     const history = Array.isArray(c.stageHistory) ? [...c.stageHistory, entry] : [entry];
     return this.update(id, { stage: stageId, stageHistory: history });
   },
+  // Team notes — a running comment thread per candidate (separate from stage history).
+  addNote(id, text, author = '') {
+    const c = this.get(id);
+    if (!c) return null;
+    const note = { text: String(text || '').trim(), author: author || '', at: new Date().toISOString() };
+    if (!note.text) return c;
+    const notes = Array.isArray(c.notes) ? [...c.notes, note] : [note];
+    return this.update(id, { notes });
+  },
+  // Reject with a structured reason (optionally parking in Future Fit).
+  reject(id, reason, note = '') {
+    const toFutureFit = reason === 'Better fit for another role';
+    const stage = toFutureFit ? 'future_fit' : 'rejected';
+    const msg = `${toFutureFit ? 'Parked in Future Fit' : 'Rejected'} — ${reason}${note ? ': ' + note : ''}.`;
+    this.update(id, { rejectReason: reason });
+    return this.setStage(id, stage, msg);
+  },
   remove(id) { backend.write(KEYS.candidates, this.all().filter(c => c.id !== id)); },
   clearForProfile(profileId) {
     backend.write(KEYS.candidates, this.all().filter(c => c.profileId !== profileId));
@@ -471,6 +488,21 @@ export const Candidates = {
     return Object.values(byPerson).sort((a, b) => (b.result?.score || 0) - (a.result?.score || 0));
   },
 };
+
+// Structured reject reasons (not free text) — searchable + feed Future Fit.
+// "Better fit for another role" is the signal to park in Future Fit.
+export const REJECT_REASONS = [
+  'Missing required skill',
+  'Not enough experience',
+  'Overqualified',
+  'Location / timezone',
+  'Compensation mismatch',
+  'Culture fit',
+  'Better fit for another role',
+  'Failed interview',
+  'Withdrew / unresponsive',
+  'Other',
+];
 
 // ── STAGES REPOSITORY (hiring pipeline — configurable, ordered) ───────────────
 export const Stages = {

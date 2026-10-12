@@ -309,3 +309,17 @@ h3 { font-size: 14px; font-weight: 600; }
 /* ── UPLOAD TRIAGE ROWS ──────────────────────────────────────────────────── */
 .triage-row { display:flex; align-items:center; gap:10px; padding:7px 10px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; margin-bottom:5px; cursor:pointer; font-size:13px; }
 .triage-row:hover { border-color:var(--accent); }
+
+/* ── TEAM NOTES ──────────────────────────────────────────────────────────── */
+.note-item { padding:8px 0; border-top:1px solid var(--border); font-size:13px; line-height:1.5; }
+.note-item:first-child { border-top:none; }
+.note-meta { color:var(--text2); font-size:11px; margin-top:3px; }
+
+/* ── COMPARE ─────────────────────────────────────────────────────────────── */
+.compare-bar { display:flex; align-items:center; justify-content:space-between; gap:12px; background:var(--surface2); border:1px solid var(--accent); border-radius:8px; padding:8px 12px; margin-bottom:12px; font-size:13px; }
+.cmp-table { border-collapse:collapse; width:100%; }
+.cmp-table th, .cmp-table td { border:1px solid var(--border); padding:8px 11px; text-align:left; font-size:13px; vertical-align:top; }
+.cmp-table th { background:var(--surface2); color:var(--text2); font-size:12px; }
+.cmp-yes { color:var(--green); } .cmp-no { color:var(--red); } .cmp-dim { color:var(--text2); }
+/* Let the comparison modal be wider than the default dialog. */
+.modal:has(.cmp-table) { max-width:860px; }
