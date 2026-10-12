@@ -24,8 +24,10 @@ def create_app() -> Flask:
         return resp
 
     app.register_blueprint(api)
-    # AUTH SEAM: register your auth blueprint here, e.g.
-    #   from .auth import auth
-    #   app.register_blueprint(auth)
     app.register_blueprint(static)
     return app
+
+
+# Module-level WSGI app for production servers (gunicorn):
+#   gunicorn server.app:app
+app = create_app()

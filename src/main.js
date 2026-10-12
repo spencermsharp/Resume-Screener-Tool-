@@ -10,6 +10,10 @@ import { renderBlacklist } from './views/blacklist.js';
 import { renderCompanies } from './views/companies.js';
 import { renderPlacements } from './views/placements.js';
 import { renderFutureFit } from './views/futurefit.js';
+import { renderTeam } from './views/team.js';
+import { renderLogin } from './views/login.js';
+import { initAuth, needsLogin, isAdmin, isAuthed, currentUser, signOut } from './auth/auth.js';
+import { isConfigured } from './auth/supabaseClient.js';
 
 initDB();
 
@@ -35,9 +39,14 @@ const END_TABS = [
 ];
 
 function tabsForWorkspace(ws) {
-  return ws === 'staffing'
+  const base = ws === 'staffing'
     ? [...CORE_TABS, ...STAFFING_TABS, ...END_TABS]
     : [...CORE_TABS, ...END_TABS];
+  // Team tab: shown to admins (cloud mode). In local mode everyone is admin,
+  // but there's no real user management, so only show it when cloud-configured.
+  if (isConfigured() && isAdmin()) base.push({ id: 'team', label: 'Team' });
+  else if (isConfigured()) base.push({ id: 'team', label: 'Account' });
+  return base;
 }
 
 let current = 'dashboard';
@@ -60,6 +69,7 @@ function viewFor(route, arg) {
     case 'placements': return renderPlacements(navigate, arg);
     case 'blacklist':  return renderBlacklist(navigate);
     case 'stages':     return renderStages(navigate);
+    case 'team':       return renderTeam(navigate);
     default:           return renderDashboard(navigate);
   }
 }
@@ -72,6 +82,12 @@ function activeTabFor(route) {
 
 function render(arg) {
   app.innerHTML = '';
+
+  // Login wall (cloud mode only). Local dev skips this.
+  if (needsLogin()) {
+    app.appendChild(renderLogin(() => { current = 'dashboard'; render(); }));
+    return;
+  }
 
   const ws = Settings.workspace();
 
@@ -99,7 +115,14 @@ function render(arg) {
     switcher.appendChild(b);
   });
   right.appendChild(switcher);
-  right.appendChild(el('span', { class: 'pill' }, 'Localhost · v0.2'));
+  // Signed-in user chip + sign out (cloud mode).
+  if (isConfigured() && isAuthed()) {
+    const u = currentUser();
+    right.appendChild(el('span', { class: 'pill' }, `${u.name} · ${u.role}`));
+    right.appendChild(el('button', { class: 'btn btn-sm btn-ghost', onclick: async () => { await signOut(); current = 'dashboard'; render(); } }, 'Sign out'));
+  } else {
+    right.appendChild(el('span', { class: 'pill' }, 'Local · v0.2'));
+  }
   topbar.appendChild(right);
   app.appendChild(topbar);
 
@@ -132,4 +155,9 @@ function render(arg) {
   app.appendChild(main);
 }
 
-render();
+// Bootstrap: initialize auth (loads runtime config + session) before first paint.
+(async function boot() {
+  app.innerHTML = '<div class="main-content"><div class="card"><p class="muted">Loading…</p></div></div>';
+  try { await initAuth(); } catch (e) { console.error('Auth init failed:', e); }
+  render();
+})();

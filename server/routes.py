@@ -45,6 +45,17 @@ def status():
     return jsonify(aiReady=config.ai_ready(), model=config.ANTHROPIC_MODEL)
 
 
+@api.get("/api/config")
+def public_config():
+    """Public runtime config for the browser. Only non-secret values:
+    the Supabase URL + anon key (both safe to expose; RLS enforces security).
+    """
+    return jsonify(
+        supabaseUrl=config.SUPABASE_URL,
+        supabaseAnonKey=config.SUPABASE_ANON_KEY,
+    )
+
+
 @api.post("/api/screen")
 @login_required
 def screen_route():

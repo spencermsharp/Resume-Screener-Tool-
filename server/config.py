@@ -35,6 +35,10 @@ class Config:
     ANTHROPIC_URL: str = "https://api.anthropic.com/v1/messages"
     ANTHROPIC_VERSION: str = "2023-06-01"
 
+    # ── Supabase (public values — safe to expose to the browser) ─────────────
+    SUPABASE_URL: str = os.environ.get("SUPABASE_URL", "")
+    SUPABASE_ANON_KEY: str = os.environ.get("SUPABASE_ANON_KEY", "")
+
     # ── Server ───────────────────────────────────────────────────────────────
     PORT: int = int(os.environ.get("PORT", "3200"))
     # Session secret for the future login. Dev default is fine locally; MUST be
