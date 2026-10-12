@@ -268,3 +268,9 @@ h3 { font-size: 14px; font-weight: 600; }
   font-size: 12px; font-weight: 600; cursor: pointer; padding: 4px 8px;
 }
 .pw-toggle:hover { text-decoration: underline; }
+
+/* ── WORKSPACE BRANDING ──────────────────────────────────────────────────── */
+.brand-combo { display: inline-flex; align-items: center; gap: 10px; }
+.brand-logo { height: 30px; width: auto; object-fit: contain; display: block; }
+.brand-plus { color: var(--text2); font-size: 20px; font-weight: 300; line-height: 1; }
+.brand-text { font-size: 18px; font-weight: 700; color: var(--text); letter-spacing: .02em; }

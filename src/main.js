@@ -90,13 +90,29 @@ function render(arg) {
 
   const ws = Settings.workspace();
 
-  // Topbar with workspace (mode) switcher.
+  // Topbar with workspace (mode) switcher. Branding is workspace-aware:
+  //  - Internal Hiring → Vimenture + Qualis logos
+  //  - Kruew Staffing   → Kruew logo
   const topbar = el('div', { class: 'topbar' });
   const brand = el('div', { class: 'topbar-brand' });
-  brand.innerHTML = `
-    <img src="public/logo.png" alt="logo" style="height:30px" onerror="this.style.display='none'" />
-    <div><span>Hiring Platform</span></div>
-  `;
+  if (ws === 'staffing') {
+    brand.innerHTML = `
+      <img class="brand-logo" src="public/logo-kruew.png" alt="Kruew"
+           onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'brand-text',textContent:'Kruew'}))" />
+      <div><span>Staffing</span></div>
+    `;
+  } else {
+    brand.innerHTML = `
+      <span class="brand-combo">
+        <img class="brand-logo" src="public/logo.png" alt="Vimenture"
+             onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'brand-text',textContent:'Vimenture'}))" />
+        <span class="brand-plus">+</span>
+        <img class="brand-logo" src="public/logo-qualis-backup.png" alt="Qualis"
+             onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'brand-text',textContent:'Qualis'}))" />
+      </span>
+      <div><span>Hiring</span></div>
+    `;
+  }
   topbar.appendChild(brand);
 
   const right = el('div', { class: 'topbar-right' });
