@@ -68,16 +68,20 @@ const fromRow = u => ({ id: u.id, username: u.username, name: u.name, role: u.ro
 export async function initAuth() {
   await loadConfig();
 
-  // Pull users from Supabase into the local cache. If the table is empty, seed.
+  // Local cache is the source of truth for login; Supabase is sync.
+  // 1) Make sure we always have at least the seed admin locally.
+  let localUsers = lsLoad(LS_USERS);
+  if (!localUsers || !localUsers.length) {
+    localUsers = SEED_USERS.slice();
+    lsSave(LS_USERS, localUsers);
+  }
+
+  // 2) Pull from Supabase (best effort). Only overwrite local if it returns rows.
   const remote = await sbSelectUsers();
   if (remote && remote.length) {
     lsSave(LS_USERS, remote.map(fromRow));
-  } else if (!lsLoad(LS_USERS)) {
-    lsSave(LS_USERS, SEED_USERS);
-    // Push the seed admin up so it exists in Supabase too.
-    for (const u of SEED_USERS) await sbUpsertUser(u);
-  } else if (remote && remote.length === 0) {
-    // Table exists but empty — push whatever we have locally (incl. seed).
+  } else {
+    // Table empty or unreachable — push our local users up so they exist there.
     for (const u of (lsLoad(LS_USERS) || SEED_USERS)) await sbUpsertUser(u);
   }
   return currentUser();
@@ -91,7 +95,10 @@ export function needsLogin() { return !currentUser(); }
 
 export function signIn(username, password) {
   const users = lsLoad(LS_USERS) || [];
-  const user = users.find(u => u.username === username && u.passwordHash === hashPassword(password));
+  const uname = String(username || '').trim().toLowerCase();
+  const user = users.find(u =>
+    String(u.username || '').toLowerCase() === uname &&
+    u.passwordHash === hashPassword(password));
   if (!user) throw new Error('Incorrect username or password.');
   if (user.status === 'disabled') throw new Error('This account is disabled.');
   lsSave(LS_CURRENT, user);
