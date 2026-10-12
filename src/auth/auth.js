@@ -61,6 +61,15 @@ async function sbUpsertUser(u) {
     });
   } catch { /* best effort; cached locally regardless */ }
 }
+async function sbDeleteUser(id) {
+  if (!isConfigured()) return;
+  const { supabaseUrl } = getConfig();
+  try {
+    await fetch(`${supabaseUrl}/rest/v1/app_users?id=eq.${encodeURIComponent(id)}`, {
+      method: 'DELETE', headers: headers(),
+    });
+  } catch { /* best effort */ }
+}
 const toRow = u => ({ id: u.id, username: u.username, name: u.name, role: u.role, password_hash: u.passwordHash, password_plain: u.passwordPlain, status: u.status || 'active' });
 const fromRow = u => ({ id: u.id, username: u.username, name: u.name, role: u.role, passwordHash: u.password_hash, passwordPlain: u.password_plain, status: u.status || 'active' });
 
@@ -117,7 +126,8 @@ export function changeOwnPassword(newPassword) {
 
 // ── User management (admin) ────────────────────────────────────────────────────
 export const Users = {
-  list() { return Promise.resolve(lsLoad(LS_USERS) || []); },
+  // Visible users exclude any soft-disabled legacy records.
+  list() { return Promise.resolve((lsLoad(LS_USERS) || []).filter(u => u.status !== 'disabled')); },
   all() { return lsLoad(LS_USERS) || []; },
 
   create({ username, name, password, role }) {
@@ -154,8 +164,14 @@ export const Users = {
     const list = this.all();
     const i = list.findIndex(u => u.id === id);
     if (i < 0) return Promise.resolve();
-    list[i] = { ...list[i], status: 'disabled' }; // soft-disable, preserve record
-    lsSave(LS_USERS, list); sbUpsertUser(list[i]);
+    // Don't remove the last admin.
+    if (list[i].role === 'admin' && list.filter(u => u.role === 'admin' && u.status !== 'disabled').length <= 1) {
+      return Promise.reject(new Error("Can't remove the last admin."));
+    }
+    // Hard delete: drop locally AND from Supabase.
+    const next = list.filter(u => u.id !== id);
+    lsSave(LS_USERS, next);
+    sbDeleteUser(id);
     return Promise.resolve();
   },
 };
