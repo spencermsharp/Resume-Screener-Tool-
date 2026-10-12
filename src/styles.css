@@ -272,6 +272,8 @@ h3 { font-size: 14px; font-weight: 600; }
 /* ── WORKSPACE BRANDING ──────────────────────────────────────────────────── */
 .brand-combo { display: inline-flex; align-items: center; gap: 10px; }
 .brand-logo { height: 30px; width: auto; object-fit: contain; display: block; }
+/* Kruew mark includes a wordmark, so size it taller to match the others' weight. */
+.brand-logo-kruew { height: 44px; }
 .brand-plus { color: var(--text2); font-size: 20px; font-weight: 300; line-height: 1; }
 .brand-text { font-size: 18px; font-weight: 700; color: var(--text); letter-spacing: .02em; }
 

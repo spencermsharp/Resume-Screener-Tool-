@@ -97,9 +97,8 @@ function render(arg) {
   const brand = el('div', { class: 'topbar-brand' });
   if (ws === 'staffing') {
     brand.innerHTML = `
-      <img class="brand-logo" src="public/logo-kruew.png" alt="Kruew"
+      <img class="brand-logo brand-logo-kruew" src="public/logo-kruew.png" alt="Kruew"
            onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'brand-text',textContent:'Kruew'}))" />
-      <div><span>Staffing</span></div>
     `;
   } else {
     brand.innerHTML = `
@@ -110,7 +109,6 @@ function render(arg) {
         <img class="brand-logo" src="public/logo-qualis-backup.png" alt="Qualis"
              onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'brand-text',textContent:'Qualis'}))" />
       </span>
-      <div><span>Hiring</span></div>
     `;
   }
   topbar.appendChild(brand);
