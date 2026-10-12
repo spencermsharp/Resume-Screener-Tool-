@@ -150,19 +150,20 @@ function render(arg) {
   if (!allTabIds(ws).includes(activeTab) && current !== 'candidate') {
     current = 'dashboard';
   }
-  const tabs = el('div', { class: 'tabs' });
-  tabsForWorkspace(ws).forEach(t => {
-    tabs.appendChild(el('button', { class: `tab-btn${t.id === activeTabFor(current) ? ' active' : ''}`, onclick: () => navigate(t.id) }, t.label));
-  });
-  main.appendChild(tabs);
-
-  // Global shared tabs — visually distinct, not tied to the workspace.
+  // Global shared tabs FIRST — visually distinct, not tied to the workspace.
   const gtabs = el('div', { class: 'tabs tabs-global' });
   gtabs.appendChild(el('span', { class: 'tabs-global-label' }, 'Shared across all companies:'));
   globalTabs().forEach(t => {
     gtabs.appendChild(el('button', { class: `tab-btn${t.id === activeTabFor(current) ? ' active' : ''}`, onclick: () => navigate(t.id) }, t.label));
   });
   main.appendChild(gtabs);
+
+  // Workspace tabs for the current company.
+  const tabs = el('div', { class: 'tabs' });
+  tabsForWorkspace(ws).forEach(t => {
+    tabs.appendChild(el('button', { class: `tab-btn${t.id === activeTabFor(current) ? ' active' : ''}`, onclick: () => navigate(t.id) }, t.label));
+  });
+  main.appendChild(tabs);
 
   // Active view (guarded so a view error shows a message, not a blank page)
   try {
