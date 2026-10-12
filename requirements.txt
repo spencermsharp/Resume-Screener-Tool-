@@ -1,3 +1,5 @@
+# No Python dependencies needed in production — the app is a static site
+# (browser talks to Supabase directly) served by static_server.py (stdlib only).
+# Flask/dotenv remain available for the optional local dev server (serve.py).
 Flask>=3.0
 python-dotenv>=1.0
-gunicorn>=21.0
