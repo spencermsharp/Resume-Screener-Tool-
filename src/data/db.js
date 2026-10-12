@@ -90,6 +90,7 @@ export const EXAMPLE_ROLE_TEMPLATES = {
 const DEFAULT_SETTINGS = {
   companyName: 'Vimenture',
   workspace: 'internal',   // which mode the app is currently showing
+  phpPerUsd: 56,           // PHP→USD conversion for staffing margin math
   // AI integration config — populated during IDE handoff. Nothing is sent anywhere yet.
   ai: { enabled: false, provider: '', model: '', note: 'AI not wired yet — rule-based baseline in use.' },
 };
@@ -170,6 +171,12 @@ export const Profiles = {
       minYears: parseFloat(data.minYears) || 0,
       workspace,
       company: data.company || (workspace === 'internal' ? 'Vimenture' : ''),
+      // Staffing-only commercial fields (Kruew): which client + the money.
+      companyId: data.companyId || '',
+      billRate: parseFloat(data.billRate) || 0,       // USD/mo client pays Kruew
+      payBudget: parseFloat(data.payBudget) || 0,     // worker pay budget
+      payCurrency: data.payCurrency || 'USD',         // 'USD' | 'PHP'
+      priority: data.priority || 'normal',            // 'normal' | 'urgent'
       status: 'open',
       openedAt: today(),
       archivedAt: null,
@@ -193,6 +200,13 @@ export const Profiles = {
   archive(id) { return this.update(id, { status: 'archived', archivedAt: today() }); },
   reopen(id) { return this.update(id, { status: 'open', archivedAt: null }); },
   remove(id) { backend.write(KEYS.profiles, this.all().filter(p => p.id !== id)); },
+  // Staffing margin math: pay converted to USD, then bill − pay.
+  payBudgetUsd(p) {
+    const rate = Settings.get().phpPerUsd || 56;
+    const pay = parseFloat(p.payBudget) || 0;
+    return (p.payCurrency === 'PHP') ? pay / rate : pay;
+  },
+  margin(p) { return (parseFloat(p.billRate) || 0) - this.payBudgetUsd(p); },
 };
 
 // ── CANDIDATES REPOSITORY ─────────────────────────────────────────────────────

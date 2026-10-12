@@ -2,7 +2,7 @@
 // A job position is DATA — its criteria, weights, and required skills. Sales now;
 // Accountant, Telecom Analyst, etc. later, no code changes. Positions can be
 // Open (actively screening) or Archived (filled/closed, kept for the record).
-import { Profiles, Candidates, Settings, WORKSPACES, EXAMPLE_ROLE_TEMPLATES } from '../data/db.js';
+import { Profiles, Candidates, Companies, Settings, WORKSPACES, EXAMPLE_ROLE_TEMPLATES } from '../data/db.js';
 import { el, esc, uid, daysOpenLabel, fmtDate } from '../utils.js';
 import { confirm as confirmDialog, alert as alertDialog } from '../ui/modal.js';
 
@@ -52,8 +52,12 @@ function renderList(navigate) {
   } else {
     const isArchived = listFilter === 'archived';
     const table = el('table');
+    const staffing = ws === 'staffing';
+    const money = n => '$' + (Math.round((parseFloat(n) || 0) * 100) / 100).toLocaleString('en-US');
     table.innerHTML = `<thead><tr>
-      <th>Position</th><th>Criteria</th><th>Resumes</th>
+      <th>Position</th>
+      ${staffing ? '<th>Client</th><th>Bill/mo</th><th>Margin/mo</th>' : '<th>Criteria</th>'}
+      <th>Resumes</th>
       <th>${isArchived ? 'Archived' : 'Open for'}</th><th></th>
     </tr></thead>`;
     const tb = el('tbody');
@@ -63,12 +67,24 @@ function renderList(navigate) {
       const timing = isArchived
         ? fmtDate(p.archivedAt)
         : daysOpenLabel(p.openedAt || p.createdAt);
+      const roleCell = `<strong>${esc(p.role)}</strong>${p.priority === 'urgent' ? ' <span class="badge badge-red">Urgent</span>' : ''}<div class="muted" style="font-size:12px">${esc(p.summary || '')}</div>`;
       const tr = el('tr');
-      tr.innerHTML = `
-        <td><strong>${esc(p.role)}</strong><div class="muted" style="font-size:12px">${esc(p.summary || '')}</div></td>
-        <td>${(p.criteria || []).length} <span class="muted">(${req} required)</span></td>
-        <td>${resumeCount}</td>
-        <td>${esc(timing)}</td>`;
+      if (staffing) {
+        const m = Profiles.margin(p);
+        tr.innerHTML = `
+          <td>${roleCell}</td>
+          <td>${esc(Companies.name(p.companyId) || '—')}</td>
+          <td class="mono">${p.billRate ? money(p.billRate) : '—'}</td>
+          <td class="mono ${m >= 0 ? 'text-green' : 'text-red'}">${p.billRate || p.payBudget ? money(m) : '—'}</td>
+          <td>${resumeCount}</td>
+          <td>${esc(timing)}</td>`;
+      } else {
+        tr.innerHTML = `
+          <td>${roleCell}</td>
+          <td>${(p.criteria || []).length} <span class="muted">(${req} required)</span></td>
+          <td>${resumeCount}</td>
+          <td>${esc(timing)}</td>`;
+      }
       const td = el('td', { style: 'white-space:nowrap' });
       td.appendChild(el('button', { class: 'btn btn-sm', onclick: () => navigate('profiles', p.id) }, 'Edit'));
       if (isArchived) {
@@ -104,6 +120,12 @@ function renderEditor(navigate, profile) {
     threshold: profile?.threshold != null ? profile.threshold : 60,
     workspace: profile?.workspace || ws,
     company: profile?.company || (ws === 'internal' ? 'Vimenture' : ''),
+    // Staffing commercial fields.
+    companyId: profile?.companyId || '',
+    billRate: profile?.billRate || '',
+    payBudget: profile?.payBudget || '',
+    payCurrency: profile?.payCurrency || 'USD',
+    priority: profile?.priority || 'normal',
     criteria: profile ? JSON.parse(JSON.stringify(profile.criteria || [])) : [],
   };
 
@@ -136,7 +158,39 @@ function renderEditor(navigate, profile) {
         ${WORKSPACES.internal.companies.map(co => `<option value="${co}"${draft.company === co ? ' selected' : ''}>${co}</option>`).join('')}
       </select>
       <div class="tag-hint">Which internal company this role is for.</div>
-    </div>` : ''}
+    </div>` : `
+    <div class="fieldset-title" style="margin:8px 0;font-weight:600;color:var(--text2);font-size:12px;text-transform:uppercase;letter-spacing:.05em">Client &amp; Commercials</div>
+    <div class="form-group">
+      <label>Client company</label>
+      <select id="p-clientco">
+        <option value="">— Select client —</option>
+        ${Companies.all().map(c => `<option value="${esc(c.id)}"${draft.companyId === c.id ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}
+      </select>
+      <div class="tag-hint">Which Kruew client this role is for. Add clients under the Companies tab.</div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Priority</label>
+        <select id="p-priority">
+          <option value="normal"${draft.priority === 'normal' ? ' selected' : ''}>Normal</option>
+          <option value="urgent"${draft.priority === 'urgent' ? ' selected' : ''}>Urgent</option>
+        </select>
+      </div>
+      <div class="form-group"><label>Bill rate — client pays (USD/mo)</label>
+        <input id="p-bill" type="number" min="0" step="1" value="${draft.billRate}" placeholder="e.g. 3000" />
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Pay budget — worker</label>
+        <input id="p-pay" type="number" min="0" step="1" value="${draft.payBudget}" placeholder="amount / month" />
+      </div>
+      <div class="form-group"><label>Pay currency</label>
+        <select id="p-paycur">
+          <option value="USD"${draft.payCurrency === 'USD' ? ' selected' : ''}>USD ($)</option>
+          <option value="PHP"${draft.payCurrency === 'PHP' ? ' selected' : ''}>PHP (₱)</option>
+        </select>
+      </div>
+    </div>
+    <div class="explain" id="p-margin" style="margin-bottom:12px"></div>`}
     <div class="form-group"><label>Summary</label><textarea id="p-summary" placeholder="What this role is and what a great candidate looks like.">${esc(draft.summary)}</textarea></div>
     <div class="form-group">
       <label>Quick start from a template</label>
@@ -145,6 +199,27 @@ function renderEditor(navigate, profile) {
     </div>
   `;
   card.appendChild(form);
+
+  // Staffing: live margin preview (bill − pay, PHP converted to USD).
+  if (draft.workspace !== 'internal') {
+    const marginBox = form.querySelector('#p-margin');
+    const rate = Settings.get().phpPerUsd || 56;
+    const money = n => '$' + (Math.round((parseFloat(n) || 0) * 100) / 100).toLocaleString('en-US');
+    const updateMargin = () => {
+      const bill = parseFloat(form.querySelector('#p-bill').value) || 0;
+      let pay = parseFloat(form.querySelector('#p-pay').value) || 0;
+      if (form.querySelector('#p-paycur').value === 'PHP') pay = pay / rate;
+      const m = bill - pay;
+      marginBox.innerHTML = `<strong>Est. monthly margin:</strong> ${money(m)}${bill > 0 ? ` (${Math.round(m / bill * 100)}% GP)` : ''}`;
+      marginBox.style.borderLeftColor = m >= 0 ? 'var(--green)' : 'var(--red)';
+    };
+    ['#p-bill', '#p-pay', '#p-paycur'].forEach(sel => {
+      const elx = form.querySelector(sel);
+      elx.addEventListener('input', updateMargin);
+      elx.addEventListener('change', updateMargin);
+    });
+    updateMargin();
+  }
 
   // Template chips
   const tWrap = form.querySelector('#p-templates');
@@ -253,6 +328,14 @@ function renderEditor(navigate, profile) {
       company: companyEl ? companyEl.value : draft.company,
       criteria: draft.criteria,
     };
+    // Staffing commercial fields (only present in staffing mode).
+    if (draft.workspace !== 'internal') {
+      payload.companyId = form.querySelector('#p-clientco').value;
+      payload.billRate = parseFloat(form.querySelector('#p-bill').value) || 0;
+      payload.payBudget = parseFloat(form.querySelector('#p-pay').value) || 0;
+      payload.payCurrency = form.querySelector('#p-paycur').value;
+      payload.priority = form.querySelector('#p-priority').value;
+    }
     if (isNew) Profiles.create(payload);
     else Profiles.update(profile.id, payload);
     navigate('profiles');
