@@ -31,7 +31,7 @@ export function renderTeam(navigate) {
   form.innerHTML = `
     <div class="form-row">
       <div class="form-group"><label>Name</label><input id="t-name" placeholder="Full name" /></div>
-      <div class="form-group"><label>Email</label><input id="t-email" type="email" placeholder="name@company.com" /></div>
+      <div class="form-group"><label>Username</label><input id="t-username" placeholder="e.g. jsmith" /></div>
     </div>
     <div class="form-row">
       <div class="form-group"><label>Temporary password</label><input id="t-pass" placeholder="They can change it after login" /></div>
@@ -39,19 +39,19 @@ export function renderTeam(navigate) {
         <select id="t-role"><option value="user" selected>User</option><option value="admin">Admin</option></select>
       </div>
     </div>
-    <div class="tag-hint">No email is sent. You hand them the email + temporary password. Only admins can add users.</div>
+    <div class="tag-hint">No email is sent. You hand them the username + temporary password. Only admins can add users.</div>
   `;
   addCard.appendChild(form);
   const addBtn = el('button', { class: 'btn btn-primary', style: 'margin-top:10px' }, 'Create user');
   addBtn.onclick = async () => {
-    const email = form.querySelector('#t-email').value.trim();
+    const username = form.querySelector('#t-username').value.trim();
     const password = form.querySelector('#t-pass').value;
     const name = form.querySelector('#t-name').value.trim();
     const role = form.querySelector('#t-role').value;
-    if (!email || !password) { await alertDialog({ title: 'Missing info', message: 'Email and temporary password are required.' }); return; }
+    if (!username || !password) { await alertDialog({ title: 'Missing info', message: 'Username and temporary password are required.' }); return; }
     addBtn.disabled = true; addBtn.textContent = 'Creating…';
     try {
-      await Users.create({ email, password, name, role });
+      await Users.create({ username, password, name, role });
       navigate('team');
     } catch (e) {
       addBtn.disabled = false; addBtn.textContent = 'Create user';
@@ -84,18 +84,18 @@ function renderUserList(mount, users, navigate) {
   mount.innerHTML = '';
   const me = currentUser();
   const table = el('table');
-  table.innerHTML = `<thead><tr><th>Name</th><th>Email</th><th>Role</th><th style="width:260px"></th></tr></thead>`;
+  table.innerHTML = `<thead><tr><th>Name</th><th>Username</th><th>Role</th><th style="width:260px"></th></tr></thead>`;
   const tb = el('tbody');
   users.forEach(u => {
     const tr = el('tr');
     tr.innerHTML = `
       <td><strong>${esc(u.name || '—')}</strong>${u.id === me.id ? ' <span class="badge badge-gray">You</span>' : ''}</td>
-      <td>${esc(u.email || '')}</td>
+      <td>${esc(u.username || u.email || '')}</td>
       <td><span class="badge ${u.role === 'admin' ? 'badge-orange' : 'badge-gray'}">${esc(u.role)}</span></td>`;
     const td = el('td', { style: 'white-space:nowrap' });
 
     td.appendChild(el('button', { class: 'btn btn-sm', onclick: async () => {
-      const np = await promptDialog({ title: `Reset password`, message: `New password for ${u.email}:`, placeholder: 'New password', confirmText: 'Reset' });
+      const np = await promptDialog({ title: `Reset password`, message: `New password for ${u.username || u.email}:`, placeholder: 'New password', confirmText: 'Reset' });
       if (np && np.trim()) {
         try { await Users.resetPassword(u.id, np.trim()); await alertDialog({ title: 'Done', message: 'Password reset. Hand them the new password.' }); }
         catch (e) { await alertDialog({ title: 'Failed', message: e.message || String(e) }); }
@@ -113,7 +113,7 @@ function renderUserList(mount, users, navigate) {
 
     if (u.id !== me.id) {
       td.appendChild(el('button', { class: 'btn btn-sm btn-danger', style: 'margin-left:6px', onclick: async () => {
-        const ok = await confirmDialog({ title: 'Remove user?', message: `${u.email} will lose access immediately.`, confirmText: 'Remove', danger: true });
+        const ok = await confirmDialog({ title: 'Remove user?', message: `${u.username || u.email} will lose access immediately.`, confirmText: 'Remove', danger: true });
         if (ok) {
           try { await Users.remove(u.id); navigate('team'); }
           catch (e) { await alertDialog({ title: 'Failed', message: e.message || String(e) }); }

@@ -13,7 +13,7 @@ export function renderLogin(onSuccess) {
   `;
   const form = el('form');
   form.innerHTML = `
-    <div class="form-group"><label>Email</label><input id="lg-email" type="email" autocomplete="username" required /></div>
+    <div class="form-group"><label>Username</label><input id="lg-user" type="text" autocomplete="username" required /></div>
     <div class="form-group"><label>Password</label><input id="lg-pass" type="password" autocomplete="current-password" required /></div>
     <div id="lg-error" class="banner banner-warn" style="display:none"></div>
     <button class="btn btn-primary" id="lg-submit" style="width:100%;justify-content:center;margin-top:4px">Sign in</button>
@@ -21,13 +21,13 @@ export function renderLogin(onSuccess) {
   const err = form.querySelector('#lg-error');
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const email = form.querySelector('#lg-email').value.trim();
+    const username = form.querySelector('#lg-user').value.trim();
     const pass = form.querySelector('#lg-pass').value;
     const btn = form.querySelector('#lg-submit');
     err.style.display = 'none';
     btn.disabled = true; btn.textContent = 'Signing in…';
     try {
-      await signIn(email, pass);
+      await signIn(username, pass);
       onSuccess();
     } catch (ex) {
       err.textContent = ex.message || 'Sign in failed.';
