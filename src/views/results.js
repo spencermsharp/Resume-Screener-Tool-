@@ -115,9 +115,12 @@ function renderRankedList(cands, profile, navigate) {
     right.appendChild(bulk('→ Advance to HR', 'hr', 'Bulk-advanced to HR.'));
     right.appendChild(bulk('→ Future Fit', 'future_fit', 'Bulk-parked in Future Fit.'));
     right.appendChild(bulk('Reject', 'rejected', 'Bulk-rejected.', 'btn-danger'));
-    const cmpBtn = el('button', { class: 'btn btn-sm btn-primary', onclick: () => openCompare(ids, profile) }, 'Compare →');
-    if (compareSel.size < 2) cmpBtn.disabled = true;
-    right.appendChild(cmpBtn);
+    // Compare only makes sense for 2–4; hide it above 4 (bulk actions stay).
+    if (compareSel.size >= 2 && compareSel.size <= 4) {
+      right.appendChild(el('button', { class: 'btn btn-sm btn-primary', onclick: () => openCompare(ids, profile) }, 'Compare →'));
+    } else if (compareSel.size > 4) {
+      right.appendChild(el('span', { class: 'muted', style: 'font-size:12px;align-self:center' }, 'Compare fits up to 4'));
+    }
     right.appendChild(el('button', { class: 'btn btn-sm btn-ghost', onclick: () => { compareSel.clear(); navigate('results', profile.id); } }, 'Clear'));
     bar.appendChild(right);
     card.appendChild(bar);
@@ -152,7 +155,7 @@ function renderRankedList(cands, profile, navigate) {
     cb.checked = compareSel.has(c.id);
     cb.onclick = (e) => {
       e.stopPropagation();
-      if (cb.checked) { if (compareSel.size >= 4) { cb.checked = false; return; } compareSel.add(c.id); }
+      if (cb.checked) compareSel.add(c.id);
       else compareSel.delete(c.id);
       navigate('results', profile.id);
     };
