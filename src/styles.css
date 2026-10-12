@@ -274,3 +274,12 @@ h3 { font-size: 14px; font-weight: 600; }
 .brand-logo { height: 30px; width: auto; object-fit: contain; display: block; }
 .brand-plus { color: var(--text2); font-size: 20px; font-weight: 300; line-height: 1; }
 .brand-text { font-size: 18px; font-weight: 700; color: var(--text); letter-spacing: .02em; }
+
+/* ── STAGE PANEL (candidate detail) ──────────────────────────────────────── */
+.stage-panel {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+.stage-panel label { font-size: 12px; font-weight: 600; color: var(--text2); margin-bottom: 5px; display: block; }

@@ -142,13 +142,24 @@ export function renderCandidate(navigate, candId) {
 
   const card = el('div', { class: 'card' });
   const header = el('div', { style: 'display:flex;align-items:center;gap:16px' });
-  header.innerHTML = `
+  const headerInfo = el('div', { style: 'display:flex;align-items:center;gap:16px;flex:1' });
+  headerInfo.innerHTML = `
     <div class="score-pill ${scoreClass(r.score || 0)}">${r.score ?? 0}</div>
-    <div style="flex:1">
+    <div>
       <h2>${esc(c.name)}</h2>
       <div class="muted">${esc(profile?.role || '—')} · ${scoreLabel(r.score || 0)}</div>
     </div>
   `;
+  header.appendChild(headerInfo);
+  // Delete lives top-right of the candidate card.
+  header.appendChild(el('button', { class: 'btn btn-sm btn-danger', onclick: async () => {
+    const ok = await confirmDialog({
+      title: 'Delete this candidate?',
+      message: `${c.name} will be removed from this position entirely. This can't be undone.`,
+      confirmText: 'Delete', cancelText: 'Cancel', danger: true,
+    });
+    if (ok) { Candidates.remove(c.id); navigate('results', c.profileId); }
+  } }, 'Delete'));
   card.appendChild(header);
 
   // Contact (best-effort from baseline parser)
@@ -260,33 +271,6 @@ function renderStageControls(c, profile, navigate) {
   } }, 'Update stage');
   moveRow.appendChild(moveBtn);
   box.appendChild(moveRow);
-
-  // Quick actions: advance to next active stage, or reject.
-  const quick = el('div', { style: 'display:flex;gap:8px;margin-top:12px;flex-wrap:wrap' });
-  const active = Stages.active();
-  const idx = active.findIndex(s => s.id === c.stage);
-  if (idx !== -1 && idx < active.length - 1) {
-    const next = active[idx + 1];
-    quick.appendChild(el('button', { class: 'btn btn-sm', onclick: () => { Candidates.setStage(c.id, next.id, `Advanced to ${next.label}.`); navigate('candidate', c.id); } }, `Advance → ${next.label}`));
-  }
-  if (c.stage !== 'future_fit') {
-    quick.appendChild(el('button', { class: 'btn btn-sm btn-ghost', onclick: () => { Candidates.setStage(c.id, 'future_fit', 'Parked in Future Fit.'); navigate('candidate', c.id); } }, 'Future Fit'));
-  }
-  if (c.stage !== 'no_interview') {
-    quick.appendChild(el('button', { class: 'btn btn-sm btn-ghost', onclick: () => { Candidates.setStage(c.id, 'no_interview', 'Marked will not interview.'); navigate('candidate', c.id); } }, 'Will not interview'));
-  }
-  if (c.stage !== 'rejected') {
-    quick.appendChild(el('button', { class: 'btn btn-sm btn-ghost', onclick: () => { Candidates.setStage(c.id, 'rejected', 'Rejected.'); navigate('candidate', c.id); } }, 'Reject'));
-  }
-  quick.appendChild(el('button', { class: 'btn btn-sm btn-danger', style: 'margin-left:auto', onclick: async () => {
-    const ok = await confirmDialog({
-      title: 'Delete this candidate?',
-      message: `${c.name} will be removed from this position entirely. This can't be undone.`,
-      confirmText: 'Delete', cancelText: 'Cancel', danger: true,
-    });
-    if (ok) { Candidates.remove(c.id); navigate('results', c.profileId); }
-  } }, 'Delete'));
-  box.appendChild(quick);
 
   // Stage history timeline.
   const hist = Array.isArray(c.stageHistory) ? [...c.stageHistory].reverse() : [];
