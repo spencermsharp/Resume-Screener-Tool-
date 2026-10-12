@@ -76,32 +76,29 @@ export function renderDashboard(navigate) {
 // the server environment (.env in dev, host secrets in prod) — the browser only
 // learns whether AI is READY, never the key itself.
 async function renderAIBanner(banner, navigate) {
-  let aiReady = false;
-  let model = 'claude-sonnet-4-5';
-  try {
-    const r = await fetch('/api/status');
-    if (r.ok) { const s = await r.json(); aiReady = !!s.aiReady; model = s.model || model; }
-  } catch { /* server unreachable — treat AI as not ready */ }
+  const model = 'claude-sonnet-4-5';
+  // AI runs through the Supabase 'screen' Edge Function, so it's available
+  // whenever Supabase is configured.
+  const { isConfigured } = await import('../auth/supabaseClient.js');
+  const aiReady = isConfigured();
 
   banner.innerHTML = '';
 
   if (!aiReady) {
     banner.className = 'banner banner-warn';
     const msg = el('span');
-    msg.innerHTML = `🧪 Running the <strong>rule-based baseline</strong>. `
-      + `Set <code>ANTHROPIC_API_KEY</code> in your <code>.env</code> (then restart) to enable Claude screening. `
-      + `<span class="ai-seam">AI seam ready</span>`;
+    msg.innerHTML = `🧪 Running the <strong>rule-based baseline</strong>. Connect Supabase (config.js) and deploy the <code>screen</code> function to enable Claude screening.`;
     banner.append(msg);
     return;
   }
 
-  // AI is ready on the server — let the user toggle it for screening runs.
+  // AI is available — let the user toggle it for screening runs.
   const ai = Settings.get().ai || {};
   banner.className = `banner ${ai.enabled ? 'banner-info' : 'banner-warn'}`;
   const msg = el('span');
   msg.innerHTML = ai.enabled
-    ? `🤖 AI screening is <strong>ON</strong> (anthropic ${esc(ai.model || model)}). Falls back to rules on any error.`
-    : `🔑 Server key detected. AI is <strong>off</strong> — turn it on to screen with Claude.`;
+    ? `🤖 AI screening is <strong>ON</strong> (Claude ${esc(ai.model || model)}). Falls back to rules on any error.`
+    : `🔑 Claude is available. AI is <strong>off</strong> — turn it on to screen with Claude.`;
   const toggle = el('button', {
     class: `btn btn-sm ${ai.enabled ? '' : 'btn-primary'}`,
     style: 'margin-left:auto',
