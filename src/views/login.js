@@ -14,10 +14,24 @@ export function renderLogin(onSuccess) {
   const form = el('form');
   form.innerHTML = `
     <div class="form-group"><label>Username</label><input id="lg-user" type="text" autocomplete="username" required /></div>
-    <div class="form-group"><label>Password</label><input id="lg-pass" type="password" autocomplete="current-password" required /></div>
+    <div class="form-group"><label>Password</label>
+      <div class="pw-wrap">
+        <input id="lg-pass" type="password" autocomplete="current-password" required />
+        <button type="button" class="pw-toggle" id="lg-eye" aria-label="Show password">Show</button>
+      </div>
+    </div>
     <div id="lg-error" class="banner banner-warn" style="display:none"></div>
     <button class="btn btn-primary" id="lg-submit" style="width:100%;justify-content:center;margin-top:4px">Sign in</button>
   `;
+  // Show/hide password toggle.
+  const eye = form.querySelector('#lg-eye');
+  const passInput = form.querySelector('#lg-pass');
+  eye.addEventListener('click', () => {
+    const show = passInput.type === 'password';
+    passInput.type = show ? 'text' : 'password';
+    eye.textContent = show ? 'Hide' : 'Show';
+  });
+
   const err = form.querySelector('#lg-error');
   form.addEventListener('submit', async (e) => {
     e.preventDefault();

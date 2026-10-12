@@ -74,14 +74,35 @@ function renderUserList(mount, users, navigate) {
   mount.innerHTML = '';
   const me = currentUser();
   const table = el('table');
-  table.innerHTML = `<thead><tr><th>Name</th><th>Username</th><th>Role</th><th style="width:260px"></th></tr></thead>`;
+  table.innerHTML = `<thead><tr><th>Name</th><th>Username</th><th>Password</th><th>Role</th><th style="width:260px"></th></tr></thead>`;
   const tb = el('tbody');
   users.forEach(u => {
     const tr = el('tr');
     tr.innerHTML = `
       <td><strong>${esc(u.name || '—')}</strong>${u.id === me.id ? ' <span class="badge badge-gray">You</span>' : ''}</td>
-      <td>${esc(u.username || u.email || '')}</td>
-      <td><span class="badge ${u.role === 'admin' ? 'badge-orange' : 'badge-gray'}">${esc(u.role)}</span></td>`;
+      <td>${esc(u.username || u.email || '')}</td>`;
+
+    // Password cell: hidden by default, click to reveal (admins only).
+    const pwTd = el('td');
+    const hasPw = !!u.passwordPlain;
+    const dots = el('span', { class: 'muted' }, hasPw ? '••••••••' : '—');
+    pwTd.appendChild(dots);
+    if (hasPw) {
+      const show = el('button', { class: 'btn btn-sm btn-ghost', style: 'margin-left:8px' }, 'Show');
+      let visible = false;
+      show.onclick = () => {
+        visible = !visible;
+        dots.textContent = visible ? u.passwordPlain : '••••••••';
+        show.textContent = visible ? 'Hide' : 'Show';
+      };
+      pwTd.appendChild(show);
+    }
+    tr.appendChild(pwTd);
+
+    const roleTd = el('td');
+    roleTd.innerHTML = `<span class="badge ${u.role === 'admin' ? 'badge-orange' : 'badge-gray'}">${esc(u.role)}</span>`;
+    tr.appendChild(roleTd);
+
     const td = el('td', { style: 'white-space:nowrap' });
 
     td.appendChild(el('button', { class: 'btn btn-sm', onclick: async () => {
