@@ -1,0 +1,9 @@
+# Force a Python runtime for Railway/Nixpacks and define the start command.
+# The app is a static site served by a tiny stdlib HTTP server.
+providers = ["python"]
+
+[phases.setup]
+nixPkgs = ["python311"]
+
+[start]
+cmd = "python3 static_server.py"

@@ -1,1 +1,1 @@
-web: python3 static_server.py
+web: python static_server.py
