@@ -92,9 +92,12 @@ function renderRankedList(cands, profile, navigate) {
   const threshold = profile.threshold != null ? profile.threshold : 60;
   const card = el('div', { class: 'card' });
 
-  const sub = el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:12px' },
-    `${cands.length} screened · ranked best-first · threshold ${threshold}%. First-level screen — a human makes the final call.`);
-  card.appendChild(sub);
+  const subRow = el('div', { class: 'row-between', style: 'margin-bottom:12px;align-items:center' });
+  subRow.appendChild(el('div', { class: 'muted', style: 'font-size:12px' },
+    `${cands.length} shown · ranked best-first · threshold ${threshold}%. First-level screen — a human makes the final call.`));
+  const exportBtn = el('button', { class: 'btn btn-sm', onclick: () => exportShortlist(cands, profile) }, '⬇ Export / share shortlist');
+  subRow.appendChild(exportBtn);
+  card.appendChild(subRow);
 
   // Compare bar — appears when candidates are selected.
   const selValid = [...compareSel].filter(id => cands.some(c => c.id === id));
@@ -367,6 +370,43 @@ function renderStageControls(c, profile, navigate) {
   }
 
   return box;
+}
+
+// Export a client-safe shortlist (top candidates). Opens a clean printable page
+// (print → PDF) with scores + AI "why" — NO internal notes or margin leaked.
+function exportShortlist(cands, profile) {
+  const top = cands.slice(0, 10);
+  const esc2 = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const rows = top.map((c, i) => {
+    const r = c.result || {};
+    const matched = (r.matched || []).map(m => esc2(m.label)).join(', ') || '—';
+    const why = esc2((r.explanation || '').split('First-level')[0] || '');
+    return `<div class="cand">
+      <div class="ch"><span class="rk">#${i + 1}</span><span class="nm">${esc2(c.name)}</span><span class="sc">${r.score ?? 0}</span></div>
+      <div class="meta">Strengths: ${matched}</div>
+      <div class="why">${why}</div>
+    </div>`;
+  }).join('');
+  const doc = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Shortlist — ${esc2(profile.role)}</title>
+    <style>
+      body{font-family:system-ui,Arial,sans-serif;max-width:720px;margin:30px auto;padding:0 20px;color:#1a2b4a}
+      h1{font-size:20px;margin:0 0 2px} .subt{color:#5a6a82;font-size:13px;margin-bottom:20px}
+      .cand{border:1px solid #dde3ec;border-radius:10px;padding:14px 16px;margin-bottom:12px}
+      .ch{display:flex;align-items:center;gap:10px}
+      .rk{color:#c8590a;font-weight:700} .nm{font-weight:700;font-size:15px;flex:1}
+      .sc{background:#c8590a;color:#fff;border-radius:8px;padding:2px 10px;font-weight:700}
+      .meta{font-size:12px;color:#5a6a82;margin-top:6px} .why{font-size:13px;margin-top:6px;line-height:1.5}
+      .foot{color:#8a9bb5;font-size:11px;margin-top:20px}
+      @media print{ .noprint{display:none} }
+    </style></head><body>
+    <h1>Candidate shortlist — ${esc2(profile.role)}</h1>
+    <div class="subt">${top.length} candidates · generated ${new Date().toLocaleDateString()}</div>
+    ${rows}
+    <div class="foot">First-level AI screen. A human reviews before any hiring decision. Internal notes and commercials are not included.</div>
+    <button class="noprint" onclick="window.print()" style="margin-top:16px;padding:8px 14px;border-radius:8px;border:1px solid #c8590a;background:#c8590a;color:#fff;font-weight:600;cursor:pointer">Print / Save as PDF</button>
+    </body></html>`;
+  const w = window.open('', '_blank');
+  if (w) { w.document.write(doc); w.document.close(); }
 }
 
 // Side-by-side comparison of selected candidates (by criterion).

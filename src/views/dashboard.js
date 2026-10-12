@@ -31,6 +31,21 @@ export function renderDashboard(navigate) {
   );
   wrap.appendChild(kpis);
 
+  // ── ROI metrics (proves the tool is working) ──────────────────────────────
+  const hired = candidates.filter(c => { const s = Stages.get(c.stage); return s && s.kind === 'hired'; });
+  // Hires that came from a Future Fit recycle (their history shows a prior future_fit stage).
+  const hiredFromPool = hired.filter(c => (c.stageHistory || []).some(h => h.stage === 'future_fit')).length;
+  const parked = candidates.filter(c => c.stage === 'future_fit').length;
+  const interviewed = candidates.filter(c => (c.stageHistory || []).some(h => { const s = Stages.get(h.stage); return s && s.kind === 'interview'; })).length;
+  const convRate = candidates.length ? Math.round(interviewed / candidates.length * 100) : 0;
+  const roi = el('div', { class: 'grid grid-4' },
+    kpi('Hired / Placed', hired.length, 'all roles'),
+    kpi('Hires from Future Fit', hiredFromPool, 'recycle ROI', hiredFromPool > 0),
+    kpi('In Future Fit', parked, 'recyclable pool'),
+    kpi('Screen → Interview', convRate + '%', 'conversion rate'),
+  );
+  wrap.appendChild(roi);
+
   // Quick actions
   const actions = el('div', { class: 'card' });
   actions.appendChild(el('div', { class: 'card-header' }, el('h2', {}, 'Get Started')));
@@ -111,8 +126,8 @@ async function renderAIBanner(banner, navigate) {
   banner.append(msg, toggle);
 }
 
-function kpi(label, value, sub) {
-  const d = el('div', { class: 'kpi' });
+function kpi(label, value, sub, highlight) {
+  const d = el('div', { class: `kpi${highlight ? ' kpi-highlight' : ''}` });
   d.innerHTML = `<div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div>`;
   return d;
 }

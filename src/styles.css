@@ -323,3 +323,7 @@ h3 { font-size: 14px; font-weight: 600; }
 .cmp-yes { color:var(--green); } .cmp-no { color:var(--red); } .cmp-dim { color:var(--text2); }
 /* Let the comparison modal be wider than the default dialog. */
 .modal:has(.cmp-table) { max-width:860px; }
+
+/* Highlighted KPI (e.g. hires-from-Future-Fit ROI) */
+.kpi-highlight { border-color: var(--green); }
+.kpi-highlight .value { color: var(--green); }
