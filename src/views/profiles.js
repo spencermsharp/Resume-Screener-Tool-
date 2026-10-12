@@ -58,7 +58,7 @@ function renderList(navigate) {
       <th>Position</th>
       ${staffing ? '<th>Client</th><th>Bill/mo</th><th>Margin/mo</th>' : '<th>Criteria</th>'}
       <th>Resumes</th>
-      <th>${isArchived ? 'Archived' : 'Open for'}</th><th></th>
+      <th>${isArchived ? 'Archived' : 'Days open'}</th><th></th>
     </tr></thead>`;
     const tb = el('tbody');
     showing.forEach(p => {
