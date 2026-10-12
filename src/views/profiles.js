@@ -8,6 +8,8 @@ import { confirm as confirmDialog, alert as alertDialog } from '../ui/modal.js';
 
 // Remember which tab (open/archived) the user last viewed, within the session.
 let listFilter = 'open';
+let listSearch = '';     // search box text
+let listCompany = '';    // company filter ('' = all)
 
 export function renderProfiles(navigate, selectedId) {
   if (selectedId === 'new') return renderEditor(navigate, null);
@@ -43,37 +45,79 @@ function renderList(navigate) {
   }, `Archived (${archivedList.length})`));
   card.appendChild(filterRow);
 
-  if (!showing.length) {
-    const e = el('div', { class: 'empty' });
-    e.innerHTML = listFilter === 'archived'
-      ? `<div class="big">🗂️</div><p>No archived positions. Archive a role once it's filled to keep its record here.</p>`
-      : `<div class="big">🧩</div><p>No open positions yet.</p>`;
-    card.appendChild(e);
-  } else {
+  // Resolve a display company name for a position (internal: Vimenture/Qualis;
+  // staffing: the client company name).
+  const companyName = p => ws === 'staffing' ? (Companies.name(p.companyId) || '—') : (p.company || '—');
+
+  // Search + company filter toolbar.
+  const companyOptions = [...new Set(showing.map(companyName).filter(c => c && c !== '—'))].sort();
+  const toolbar = el('div', { style: 'display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap' });
+  const search = el('input', { type: 'text', placeholder: 'Search positions…', value: listSearch, style: 'flex:1;min-width:200px' });
+  search.addEventListener('input', () => {
+    listSearch = search.value;
+    applyFilter();
+    // keep focus + caret after re-filter
+    const pos = search.selectionStart;
+    const again = toolbar.querySelector('input'); if (again) { again.focus(); again.setSelectionRange(pos, pos); }
+  });
+  const coSel = el('select', { style: 'max-width:220px' });
+  coSel.appendChild(el('option', { value: '' }, 'All companies'));
+  companyOptions.forEach(c => { const o = el('option', { value: c }, c); if (c === listCompany) o.setAttribute('selected', 'selected'); coSel.appendChild(o); });
+  coSel.addEventListener('change', () => { listCompany = coSel.value; applyFilter(); });
+  toolbar.append(search, coSel);
+  card.appendChild(toolbar);
+
+  const tableMount = el('div');
+  card.appendChild(tableMount);
+
+  function applyFilter() {
+    const q = listSearch.trim().toLowerCase();
+    const filtered = showing.filter(p => {
+      if (listCompany && companyName(p) !== listCompany) return false;
+      if (q && !(`${p.role} ${p.summary || ''} ${companyName(p)}`.toLowerCase().includes(q))) return false;
+      return true;
+    });
+    renderTable(filtered);
+  }
+
+  function renderTable(rows) {
+    tableMount.innerHTML = '';
+    if (!showing.length) {
+      const e = el('div', { class: 'empty' });
+      e.innerHTML = listFilter === 'archived'
+        ? `<div class="big">🗂️</div><p>No archived positions. Archive a role once it's filled to keep its record here.</p>`
+        : `<div class="big">🧩</div><p>No open positions yet.</p>`;
+      tableMount.appendChild(e);
+      return;
+    }
+    if (!rows.length) {
+      tableMount.appendChild(el('div', { class: 'muted', style: 'padding:16px 0' }, 'No positions match your search / filter.'));
+      return;
+    }
     const isArchived = listFilter === 'archived';
-    const table = el('table');
     const staffing = ws === 'staffing';
     const money = n => '$' + (Math.round((parseFloat(n) || 0) * 100) / 100).toLocaleString('en-US');
+    const table = el('table');
     table.innerHTML = `<thead><tr>
       <th>Position</th>
-      ${staffing ? '<th>Client</th><th>Bill/mo</th><th>Margin/mo</th>' : '<th>Criteria</th>'}
+      <th>${staffing ? 'Client' : 'Company'}</th>
+      ${staffing ? '<th>Bill/mo</th><th>Margin/mo</th>' : '<th>Criteria</th>'}
       <th>Resumes</th>
       <th>${isArchived ? 'Archived' : 'Days open'}</th><th></th>
     </tr></thead>`;
     const tb = el('tbody');
-    showing.forEach(p => {
+    rows.forEach(p => {
       const req = (p.criteria || []).filter(c => c.required).length;
       const resumeCount = Candidates.byProfile(p.id).length;
-      const timing = isArchived
-        ? fmtDate(p.archivedAt)
-        : daysOpenLabel(p.openedAt || p.createdAt);
+      const timing = isArchived ? fmtDate(p.archivedAt) : daysOpenLabel(p.openedAt || p.createdAt);
       const roleCell = `<strong>${esc(p.role)}</strong>${p.priority === 'urgent' ? ' <span class="badge badge-red">Urgent</span>' : ''}<div class="muted" style="font-size:12px">${esc(p.summary || '')}</div>`;
+      const co = esc(companyName(p));
       const tr = el('tr');
       if (staffing) {
         const m = Profiles.margin(p);
         tr.innerHTML = `
           <td>${roleCell}</td>
-          <td>${esc(Companies.name(p.companyId) || '—')}</td>
+          <td>${co}</td>
           <td class="mono">${p.billRate ? money(p.billRate) : '—'}</td>
           <td class="mono ${m >= 0 ? 'text-green' : 'text-red'}">${p.billRate || p.payBudget ? money(m) : '—'}</td>
           <td>${resumeCount}</td>
@@ -81,6 +125,7 @@ function renderList(navigate) {
       } else {
         tr.innerHTML = `
           <td>${roleCell}</td>
+          <td><span class="badge badge-gray">${co}</span></td>
           <td>${(p.criteria || []).length} <span class="muted">(${req} required)</span></td>
           <td>${resumeCount}</td>
           <td>${esc(timing)}</td>`;
@@ -103,8 +148,10 @@ function renderList(navigate) {
       tb.appendChild(tr);
     });
     table.appendChild(tb);
-    card.appendChild(table);
+    tableMount.appendChild(table);
   }
+
+  applyFilter();
   wrap.appendChild(card);
   return wrap;
 }
