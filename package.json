@@ -1,0 +1,11 @@
+{
+  "name": "vimenture-resume-screener",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Vimenture resume screening tool — ingest a stack of PDF resumes and rank the best candidates against a configurable, role-agnostic screening profile, with a written explanation of why each fits. First-level screening assistant; a human makes final hiring decisions.",
+  "scripts": {
+    "start": "python3 serve.py",
+    "dev": "python3 serve.py"
+  },
+  "dependencies": {}
+}
