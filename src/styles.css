@@ -305,3 +305,7 @@ h3 { font-size: 14px; font-weight: 600; }
 .ff-expiring td { opacity:.6; }
 .ff-name { cursor:pointer; }
 .ff-name:hover { color:var(--accent); }
+
+/* ── UPLOAD TRIAGE ROWS ──────────────────────────────────────────────────── */
+.triage-row { display:flex; align-items:center; gap:10px; padding:7px 10px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; margin-bottom:5px; cursor:pointer; font-size:13px; }
+.triage-row:hover { border-color:var(--accent); }

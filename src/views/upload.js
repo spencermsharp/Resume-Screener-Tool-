@@ -1,8 +1,8 @@
 // ── UPLOAD & SCREEN VIEW ──────────────────────────────────────────────────────
-import { Profiles, Candidates, Blacklist, Settings } from '../data/db.js';
+import { Profiles, Candidates, People, Blacklist, Settings, Stages } from '../data/db.js';
 import { extractText, lightStructure } from '../data/parser.js';
 import { screenCandidate } from '../data/screener.js';
-import { el, esc } from '../utils.js';
+import { el, esc, scoreClass } from '../utils.js';
 
 // Store a resume PDF in Supabase Storage (bucket: 'resumes') via REST and return
 // a public URL for preview. If Supabase isn't configured, returns '' (text still
@@ -259,7 +259,12 @@ export function renderUpload(navigate) {
         try {
           const res = await extractText(f);
           if (res.ok && res.rawText.trim()) {
-            toScreen.push({ fileName: displayName, rawText: res.rawText, file: f });
+            // Dedupe/known-person detection BEFORE screening.
+            const struct = lightStructure(res.rawText);
+            const nm = struct.name || displayName;
+            const banned = Blacklist.match({ name: nm, email: struct.email });
+            const known = banned ? null : People.match({ name: nm, email: struct.email });
+            toScreen.push({ fileName: displayName, rawText: res.rawText, file: f, _struct: struct, _banned: banned, _known: known });
           } else {
             skipped.push({ name: displayName, reason: res.reason || 'Could not read file.' });
           }
@@ -284,16 +289,18 @@ export function renderUpload(navigate) {
 
       // ── Phase 2: screen each candidate ──────────────────────────────────
       const created = [];
+      const dedupe = { newN: 0, knownN: 0, bannedN: 0 };
       for (const item of toScreen) {
+        if (item._banned) dedupe.bannedN++; else if (item._known) dedupe.knownN++; else dedupe.newN++;
         const who = item.name || item.fileName || 'Pasted text';
         label.textContent = `Screening ${who}`;
         await tick();
         try {
-          const struct = lightStructure(item.rawText);
+          const struct = item._struct || lightStructure(item.rawText);
           const result = await screenCandidate(item.rawText, profile);
           // Blackball check: if this person is on the shared do-not-hire list,
           // they start at "Out" regardless of score.
-          const banned = Blacklist.match({ name: item.name || struct.name, email: struct.email });
+          const banned = item._banned || Blacklist.match({ name: item.name || struct.name, email: struct.email });
           const startStage = banned ? 'out' : 'screened';
           // Persist the original PDF on the server so the detail page can
           // preview it (survives reloads). Non-PDFs just skip this.
@@ -324,7 +331,7 @@ export function renderUpload(navigate) {
         paint();
       }
       label.textContent = 'Done';
-      renderResults(created, skipped, profile, navigate, resultMount);
+      renderResults(created, skipped, profile, navigate, resultMount, dedupe);
     } catch (err) {
       resultMount.innerHTML = '';
       const card = el('div', { class: 'card' });
@@ -344,10 +351,20 @@ export function renderUpload(navigate) {
   return wrap;
 }
 
-function renderResults(created, skipped, profile, navigate, mount) {
+function renderResults(created, skipped, profile, navigate, mount, dedupe) {
   mount.innerHTML = '';
   const card = el('div', { class: 'card' });
   card.appendChild(el('div', { class: 'card-header' }, el('h2', {}, 'Screening Complete')));
+
+  // Dedupe summary (known / new / blackballed).
+  if (dedupe && (dedupe.knownN || dedupe.bannedN)) {
+    const d = el('div', { class: 'banner banner-info' });
+    const bits = [`${dedupe.newN} new`];
+    if (dedupe.knownN) bits.push(`${dedupe.knownN} already in your system`);
+    if (dedupe.bannedN) bits.push(`${dedupe.bannedN} blackballed → auto-moved to Out`);
+    d.innerHTML = `👤 ${bits.join(' · ')}.`;
+    card.appendChild(d);
+  }
 
   if (skipped.length) {
     const b = el('div', { class: 'banner banner-warn' });
@@ -357,11 +374,69 @@ function renderResults(created, skipped, profile, navigate, mount) {
 
   if (!created.length) {
     card.appendChild(el('p', { class: 'muted' }, 'No candidates were screened. Try a .txt file or the paste box.'));
-  } else {
-    const b = el('div', { class: 'banner banner-info' }, `✅ Screened ${created.length} candidate(s) against "${profile.role}".`);
-    card.appendChild(b);
-    card.appendChild(el('button', { class: 'btn btn-primary', onclick: () => navigate('results', profile.id) }, 'View Ranked Results →'));
+    mount.appendChild(card);
+    return;
   }
+
+  card.appendChild(el('div', { class: 'banner banner-info' }, `✅ Screened ${created.length} candidate(s) against "${profile.role}".`));
   mount.appendChild(card);
+
+  // ── AI TRIAGE: auto-sort into Clear yes / Borderline / Clear no ───────────
+  const threshold = profile.threshold != null ? profile.threshold : 60;
+  const BAND = 12; // borderline window around the threshold
+  const notBanned = created.filter(c => c.stage !== 'out');
+  const groups = {
+    yes:   { title: '✅ Clear yes — meets the bar', color: 'var(--green)', items: [] },
+    maybe: { title: '🤔 Borderline — worth a look', color: 'var(--yellow)', items: [] },
+    no:    { title: '❌ Clear no — below the bar', color: 'var(--red)', items: [] },
+  };
+  notBanned.forEach(c => {
+    const s = c.result?.score || 0;
+    if (s >= threshold + BAND) groups.yes.items.push(c);
+    else if (s >= threshold - BAND) groups.maybe.items.push(c);
+    else groups.no.items.push(c);
+  });
+
+  const triageCard = el('div', { class: 'card' });
+  triageCard.appendChild(el('div', { class: 'card-header' }, el('h3', {}, 'AI triage — act in bulk, then review'),
+    el('button', { class: 'btn btn-sm btn-primary', onclick: () => navigate('results', profile.id) }, 'Open full results →')));
+  triageCard.appendChild(el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:12px' },
+    `Sorted around the ${threshold}% threshold. Spend your time on the borderline group — bulk-act on the obvious yes/no.`));
+
+  Object.entries(groups).forEach(([key, g]) => {
+    if (!g.items.length) return;
+    const section = el('div', { style: 'margin-bottom:14px' });
+    const head = el('div', { style: 'display:flex;align-items:center;gap:10px;margin-bottom:6px' });
+    head.appendChild(el('span', { style: `font-weight:700;color:${g.color}` }, `${g.title} · ${g.items.length}`));
+
+    // Bulk actions per group.
+    const bulk = el('span', { style: 'margin-left:auto;display:flex;gap:6px' });
+    const ids = g.items.map(c => c.id);
+    if (key === 'yes') {
+      bulk.appendChild(bulkBtn('→ Advance all to HR', () => { ids.forEach(id => Candidates.setStage(id, 'hr', 'Bulk-advanced to HR from triage.')); navigate('results', profile.id); }));
+    }
+    if (key === 'maybe') {
+      bulk.appendChild(bulkBtn('All → Future Fit', () => { ids.forEach(id => Candidates.setStage(id, 'future_fit', 'Bulk-parked in Future Fit from triage.')); navigate('results', profile.id); }));
+    }
+    if (key === 'no') {
+      bulk.appendChild(bulkBtn('Reject all', () => { ids.forEach(id => Candidates.setStage(id, 'rejected', 'Bulk-rejected from triage.')); navigate('results', profile.id); }, 'btn-danger'));
+      bulk.appendChild(bulkBtn('All → Future Fit', () => { ids.forEach(id => Candidates.setStage(id, 'future_fit', 'Bulk-parked in Future Fit from triage.')); navigate('results', profile.id); }));
+    }
+    head.appendChild(bulk);
+    section.appendChild(head);
+
+    g.items.sort((a, b) => (b.result.score || 0) - (a.result.score || 0)).forEach(c => {
+      const row = el('div', { class: 'triage-row', onclick: () => navigate('candidate', c.id) });
+      row.innerHTML = `<span class="score-chip ${scoreClass(c.result.score)}">${c.result.score}</span><strong>${esc(c.name)}</strong>`;
+      section.appendChild(row);
+    });
+    triageCard.appendChild(section);
+  });
+
+  mount.appendChild(triageCard);
   mount.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function bulkBtn(label, onclick, extra = '') {
+  return el('button', { class: `btn btn-sm ${extra}`, onclick: (e) => { e.stopPropagation(); onclick(); } }, label);
 }

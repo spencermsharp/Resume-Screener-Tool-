@@ -6,6 +6,8 @@ import { renderPipeline } from './pipeline.js';
 
 // Remember the last-used sub-view (ranked list vs pipeline board) per session.
 let resultsView = 'ranked';
+// Active filter: 'active' = still in the running; 'all' = everyone screened.
+let resultsFilter = 'active';
 
 // Maps a stage kind to a badge color class.
 function stageBadgeClass(stageId) {
@@ -54,11 +56,9 @@ export function renderResults(navigate, profileId) {
     return wrap;
   }
 
-  const cands = Candidates.byProfile(activeId)
-    .filter(c => c.result)
-    .sort((a, b) => (b.result.score || 0) - (a.result.score || 0));
+  const all = Candidates.byProfile(activeId).filter(c => c.result);
 
-  if (!cands.length) {
+  if (!all.length) {
     const card = el('div', { class: 'card' });
     const e = el('div', { class: 'empty' });
     e.innerHTML = `<div class="big">📄</div><p>No candidates screened for this position yet.</p>`;
@@ -68,7 +68,19 @@ export function renderResults(navigate, profileId) {
     return wrap;
   }
 
-  wrap.appendChild(renderRankedList(cands, profile, navigate));
+  // Active = still in the running (not rejected, out, future-fit, or hired).
+  const isActive = c => { const s = Stages.get(c.stage); return s && s.kind !== 'reject' && s.kind !== 'hired' && s.kind !== 'parked'; };
+  const activeCands = all.filter(isActive);
+  const shown = (resultsFilter === 'active' ? activeCands : all)
+    .sort((a, b) => (b.result.score || 0) - (a.result.score || 0));
+
+  // Active / All filter toggle.
+  const filterRow = el('div', { class: 'tabs', style: 'margin:0 0 14px' });
+  filterRow.appendChild(el('button', { class: `tab-btn${resultsFilter === 'active' ? ' active' : ''}`, onclick: () => { resultsFilter = 'active'; navigate('results', activeId); } }, `In the running (${activeCands.length})`));
+  filterRow.appendChild(el('button', { class: `tab-btn${resultsFilter === 'all' ? ' active' : ''}`, onclick: () => { resultsFilter = 'all'; navigate('results', activeId); } }, `All screened (${all.length})`));
+  wrap.appendChild(filterRow);
+
+  wrap.appendChild(renderRankedList(shown, profile, navigate));
   return wrap;
 }
 
