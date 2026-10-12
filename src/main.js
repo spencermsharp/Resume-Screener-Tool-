@@ -49,10 +49,12 @@ function tabsForWorkspace(ws) {
 }
 
 let current = 'dashboard';
+let currentArg = undefined;
 
 // navigate(route, arg?) — the routing contract every view uses.
 function navigate(route, arg) {
   current = route;
+  currentArg = arg;
   render(arg);
 }
 
@@ -174,11 +176,15 @@ function render(arg) {
   try { await initAuth(); } catch (e) { console.error('Auth init failed:', e); }
   render();
   // Cloud sync: pull shared data, start write queue + periodic refresh. Re-render
-  // when fresh data arrives so other devices' changes appear. Only re-render when
-  // the user is idle on a list view (not mid-edit) to avoid disrupting input.
+  // only when it's safe — never while the user is creating/editing. We treat the
+  // presence of ANY input/textarea/select on screen (i.e. an open form/editor) as
+  // "do not disturb", plus the detail/editor routes, so work is never interrupted.
   initCloudSync(() => {
-    const safeViews = ['dashboard', 'profiles', 'results', 'futurefit', 'companies', 'placements'];
-    const noActiveInput = !document.activeElement || !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName);
-    if (safeViews.includes(current) && noActiveInput) render();
+    const listViews = ['dashboard', 'profiles', 'results', 'futurefit', 'companies', 'placements', 'blacklist', 'team'];
+    if (!listViews.includes(current)) return;                 // not a plain list view
+    if (currentArg) return;                                   // an editor/detail is open (id or 'new')
+    // Any form field on screen means an editor is open — don't disturb.
+    if (document.querySelector('.main-content input, .main-content textarea, .main-content select')) return;
+    render(currentArg);
   }).catch(e => console.warn('Cloud sync init failed:', e));
 })();
