@@ -196,7 +196,7 @@ function renderEditor(navigate, profile) {
     <div class="form-group">
       <label>Interview threshold (%)</label>
       <input id="p-threshold" type="number" min="0" max="100" step="1" value="${draft.threshold}" />
-      <div class="tag-hint">Candidates scoring below this are flagged "below threshold" and suggested for Will Not Interview. Nothing is auto-rejected — you decide.</div>
+      <div class="tag-hint">Candidates scoring below this are flagged "below threshold". Nothing is auto-rejected — you decide.</div>
     </div>
     ${draft.workspace === 'internal' ? `
     <div class="form-group">

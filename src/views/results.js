@@ -103,13 +103,22 @@ function renderRankedList(cands, profile, navigate) {
   const selValid = [...compareSel].filter(id => cands.some(c => c.id === id));
   compareSel = new Set(selValid);
   if (compareSel.size) {
+    const ids = [...compareSel];
     const bar = el('div', { class: 'compare-bar' });
-    bar.appendChild(el('span', {}, `${compareSel.size} selected to compare`));
-    const right = el('div', { style: 'display:flex;gap:8px' });
-    right.appendChild(el('button', { class: 'btn btn-sm btn-ghost', onclick: () => { compareSel.clear(); navigate('results', profile.id); } }, 'Clear'));
-    const cmpBtn = el('button', { class: 'btn btn-sm btn-primary', onclick: () => openCompare([...compareSel], profile) }, 'Compare →');
+    bar.appendChild(el('span', {}, `${compareSel.size} selected`));
+    const right = el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' });
+    // Bulk stage actions.
+    const bulk = (label, stageId, note, cls = '') => el('button', { class: `btn btn-sm ${cls}`, onclick: () => {
+      ids.forEach(id => Candidates.setStage(id, stageId, note));
+      compareSel.clear(); navigate('results', profile.id);
+    } }, label);
+    right.appendChild(bulk('→ Advance to HR', 'hr', 'Bulk-advanced to HR.'));
+    right.appendChild(bulk('→ Future Fit', 'future_fit', 'Bulk-parked in Future Fit.'));
+    right.appendChild(bulk('Reject', 'rejected', 'Bulk-rejected.', 'btn-danger'));
+    const cmpBtn = el('button', { class: 'btn btn-sm btn-primary', onclick: () => openCompare(ids, profile) }, 'Compare →');
     if (compareSel.size < 2) cmpBtn.disabled = true;
     right.appendChild(cmpBtn);
+    right.appendChild(el('button', { class: 'btn btn-sm btn-ghost', onclick: () => { compareSel.clear(); navigate('results', profile.id); } }, 'Clear'));
     bar.appendChild(right);
     card.appendChild(bar);
   }

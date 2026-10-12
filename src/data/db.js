@@ -212,7 +212,6 @@ const DEFAULT_SETTINGS = {
 const DEFAULT_STAGES = [
   { id: 'screened',   label: 'Screened',                 kind: 'screen',    terminal: false },
   { id: 'future_fit', label: 'Future Fit',               kind: 'parked',    terminal: false },
-  { id: 'no_interview', label: 'Will Not Interview',     kind: 'reject',    terminal: true  },
   { id: 'hr',         label: 'HR Interview',             kind: 'interview', terminal: false },
   { id: 'mark_sharp', label: 'Mark Sharp Interview',     kind: 'interview', terminal: false },
   { id: 'hiring_mgr', label: 'Hiring Manager Interview', kind: 'interview', terminal: false },
@@ -239,8 +238,16 @@ export function initDB() {
       c.stageHistory = c.stageHistory || [{ stage: c.stage, at: new Date().toISOString(), note: 'Imported from earlier version.' }];
       migrated = true;
     }
+    // Retire the removed "Will Not Interview" stage → fold into Rejected.
+    if (c.stage === 'no_interview') { c.stage = 'rejected'; migrated = true; }
   }
   if (migrated) backend.write(KEYS.candidates, cands);
+
+  // Drop the retired stage from any saved stages list.
+  const savedStages = backend.read(KEYS.stages);
+  if (Array.isArray(savedStages) && savedStages.some(s => s.id === 'no_interview')) {
+    backend.write(KEYS.stages, savedStages.filter(s => s.id !== 'no_interview'));
+  }
 
   // Backfill threshold + workspace/company on older profiles that predate them.
   const profs = backend.read(KEYS.profiles) || [];
