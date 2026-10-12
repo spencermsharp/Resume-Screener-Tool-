@@ -258,6 +258,9 @@ h3 { font-size: 14px; font-weight: 600; }
   box-shadow: 0 20px 50px rgba(0,0,0,.2); text-align: left;
 }
 .login-card h1 { color: var(--text); }
+.login-logos { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+.login-logos .brand-logo { height: 28px; }
+.login-logos .brand-logo-kruew { height: 38px; padding: 5px 10px; }
 
 /* ── PASSWORD FIELD TOGGLE ───────────────────────────────────────────────── */
 .pw-wrap { position: relative; display: flex; align-items: center; }

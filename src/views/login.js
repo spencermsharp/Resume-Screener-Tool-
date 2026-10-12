@@ -7,7 +7,16 @@ export function renderLogin(onSuccess) {
   const wrap = el('div', { class: 'login-wrap' });
   const card = el('div', { class: 'login-card' });
   card.innerHTML = `
-    <img src="public/logo.png" alt="logo" style="height:36px;margin-bottom:16px" onerror="this.style.display='none'" />
+    <div class="login-logos">
+      <img class="brand-logo" src="public/logo.png" alt="Vimenture"
+           onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'brand-text',textContent:'Vimenture'}))" />
+      <span class="brand-plus">+</span>
+      <img class="brand-logo" src="public/logo-qualis-backup.png" alt="Qualis"
+           onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'brand-text',textContent:'Qualis'}))" />
+      <span class="brand-plus">+</span>
+      <img class="brand-logo brand-logo-kruew" src="public/logo-kruew.png" alt="Kruew"
+           onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'brand-text',textContent:'Kruew'}))" />
+    </div>
     <h1 style="font-size:20px;margin-bottom:4px">Resume Screener Tool</h1>
     <p class="muted" style="margin-bottom:20px">Sign in to continue</p>
   `;
