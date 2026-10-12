@@ -39,13 +39,116 @@ export const WORKSPACES = {
   internal: { id: 'internal', label: 'Internal Hiring', companies: ['Vimenture', 'Qualis'] },
 };
 
-// ── STORAGE BACKEND (the swappable seam) ──────────────────────────────────────
+// Maps a localStorage key → Supabase sync config.
+//   collection: an array of {id,...} items → one row per item in `table`.
+//   kv:         a single blob → one row in `app_kv` keyed by `kvKey`.
+const SYNC = {
+  [KEYS.profiles]:   { kind: 'collection', table: 'positions' },
+  [KEYS.candidates]: { kind: 'collection', table: 'candidates' },
+  [KEYS.companies]:  { kind: 'collection', table: 'companies' },
+  [KEYS.placements]: { kind: 'collection', table: 'placements' },
+  [KEYS.stages]:     { kind: 'kv', kvKey: 'stages' },
+  [KEYS.blacklist]:  { kind: 'kv', kvKey: 'blacklist' },
+  // NOTE: settings (current workspace, AI toggle) are deliberately NOT synced —
+  // they're per-device UI state, not shared data.
+};
+
+// Lazily-loaded sync deps (avoids a hard import cycle at module load).
+let _wq = null, _rest = null;
+async function wq() { if (!_wq) _wq = await import('./writeQueue.js'); return _wq; }
+async function rest() { if (!_rest) _rest = await import('./sbRest.js'); return _rest; }
+
+// ── STORAGE BACKEND (localStorage cache + write-through to Supabase) ──────────
 const backend = {
   read(key) { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } },
-  write(key, value) { localStorage.setItem(key, JSON.stringify(value)); },
-  // Reserved for the live phase — a real backend implements these as network calls.
-  async readAsync(key) { return this.read(key); },
-  async writeAsync(key, value) { return this.write(key, value); },
+
+  write(key, value) {
+    const prev = this.read(key);
+    localStorage.setItem(key, JSON.stringify(value));
+    // Fire-and-forget sync so the UI stays instant (durable queue handles retries).
+    this._sync(key, value, prev);
+  },
+
+  // Diff the new value against the previous and enqueue minimal Supabase writes.
+  async _sync(key, value, prev) {
+    const cfg = SYNC[key];
+    if (!cfg) return;
+    try {
+      const { enqueueUpsert, enqueueDelete } = await wq();
+      if (cfg.kind === 'kv') {
+        enqueueUpsert('app_kv', [{ key: cfg.kvKey, value, updated_at: new Date().toISOString() }], `kv:${cfg.kvKey}`);
+        return;
+      }
+      // collection: upsert changed/new items, delete removed ones.
+      const list = Array.isArray(value) ? value : [];
+      const prevList = Array.isArray(prev) ? prev : [];
+      const nextIds = new Set(list.map(x => String(x.id)));
+      const changed = [];
+      const prevById = {};
+      prevList.forEach(x => { prevById[String(x.id)] = x; });
+      for (const item of list) {
+        const before = prevById[String(item.id)];
+        if (!before || JSON.stringify(before) !== JSON.stringify(item)) {
+          changed.push({ id: String(item.id), data: item, updated_at: new Date().toISOString() });
+        }
+      }
+      if (changed.length) enqueueUpsert(cfg.table, changed, cfg.table);
+      for (const old of prevList) {
+        if (!nextIds.has(String(old.id))) enqueueDelete(cfg.table, String(old.id), 'id', cfg.table);
+      }
+    } catch (e) { console.warn('[sync] enqueue failed', e); }
+  },
+
+  // Pull all tables from Supabase into the local cache on boot. Protects any
+  // records that still have pending (un-synced) local writes.
+  async pullAll() {
+    const r = await rest();
+    const { pendingRecordIds } = await wq();
+    const pend = pendingRecordIds();
+    for (const [lsKey, cfg] of Object.entries(SYNC)) {
+      if (cfg.kind === 'kv') {
+        const rows = await r.sbSelect('app_kv');
+        if (!rows) continue;
+        const row = rows.find(x => x.key === cfg.kvKey);
+        if (row && row.value != null) {
+          localStorage.setItem(lsKey, JSON.stringify(row.value));
+        } else {
+          // No server row yet — push local up so it exists for other devices.
+          const localVal = this.read(lsKey);
+          if (localVal != null) {
+            const { enqueueUpsert } = await wq();
+            enqueueUpsert('app_kv', [{ key: cfg.kvKey, value: localVal, updated_at: new Date().toISOString() }], `kv:${cfg.kvKey}`);
+          }
+        }
+        continue;
+      }
+      const rows = await r.sbSelect(cfg.table);
+      if (!rows) continue;                              // fetch failed — keep local
+      const serverItems = rows.map(x => x.data).filter(Boolean);
+      // Safety: if the server table is empty but we have local data, don't wipe
+      // local — instead push local up (first-run migration of existing data).
+      if (serverItems.length === 0) {
+        const localList = this.read(lsKey) || [];
+        if (localList.length) {
+          const { enqueueUpsert } = await wq();
+          enqueueUpsert(cfg.table, localList.map(x => ({ id: String(x.id), data: x, updated_at: new Date().toISOString() })), cfg.table);
+        }
+        continue;
+      }
+      // Protect items with pending local writes from being overwritten.
+      const p = pend[cfg.table];
+      let merged = serverItems;
+      if (p && (p.upsert.size || p.del.size)) {
+        const localList = this.read(lsKey) || [];
+        const localById = {}; localList.forEach(x => { localById[String(x.id)] = x; });
+        merged = serverItems
+          .filter(x => !p.del.has(String(x.id)))
+          .map(x => p.upsert.has(String(x.id)) && localById[String(x.id)] ? localById[String(x.id)] : x);
+        p.upsert.forEach(id => { if (localById[id] && !merged.some(x => String(x.id) === id)) merged.push(localById[id]); });
+      }
+      localStorage.setItem(lsKey, JSON.stringify(merged));
+    }
+  },
 };
 
 /**
@@ -312,6 +415,28 @@ export const Stages = {
   },
   reset() { return this.save(JSON.parse(JSON.stringify(DEFAULT_STAGES))); },
 };
+
+// ── CLOUD SYNC BOOTSTRAP ──────────────────────────────────────────────────────
+// Call once after initDB(). Pulls shared data from Supabase into the local cache,
+// starts the durable write-queue worker, and polls periodically so other devices'
+// changes appear. Safe no-op when Supabase isn't configured.
+export async function initCloudSync(onPulled) {
+  const { isConfigured } = await import('../auth/supabaseClient.js');
+  if (!isConfigured()) return;
+  const { startQueueWorker, drainQueue } = await import('./writeQueue.js');
+  try { await backend.pullAll(); if (onPulled) onPulled(); } catch (e) { console.warn('[sync] initial pull failed', e); }
+  startQueueWorker(5000);
+  // Periodic pull so changes from other devices show up (every 15s), but skip
+  // while we have unsynced local writes to avoid clobbering them mid-flight.
+  setInterval(async () => {
+    try {
+      const { hasPendingWrites } = await import('./writeQueue.js');
+      if (hasPendingWrites()) { drainQueue(); return; }
+      await backend.pullAll();
+      if (onPulled) onPulled();
+    } catch { /* keep going */ }
+  }, 15000);
+}
 
 // ── SETTINGS REPOSITORY ───────────────────────────────────────────────────────
 export const Settings = {

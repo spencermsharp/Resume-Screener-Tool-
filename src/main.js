@@ -1,5 +1,5 @@
 // ── APP SHELL — Kruew + Vimenture/Qualis Hiring Platform ─────────────────────
-import { initDB, Settings, WORKSPACES } from './data/db.js';
+import { initDB, initCloudSync, Settings, WORKSPACES } from './data/db.js';
 import { el } from './utils.js';
 import { renderDashboard } from './views/dashboard.js';
 import { renderProfiles } from './views/profiles.js';
@@ -175,4 +175,12 @@ function render(arg) {
   app.innerHTML = '<div class="main-content"><div class="card"><p class="muted">Loading…</p></div></div>';
   try { await initAuth(); } catch (e) { console.error('Auth init failed:', e); }
   render();
+  // Cloud sync: pull shared data, start write queue + periodic refresh. Re-render
+  // when fresh data arrives so other devices' changes appear. Only re-render when
+  // the user is idle on a list view (not mid-edit) to avoid disrupting input.
+  initCloudSync(() => {
+    const safeViews = ['dashboard', 'profiles', 'results', 'futurefit', 'companies', 'placements'];
+    const noActiveInput = !document.activeElement || !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName);
+    if (safeViews.includes(current) && noActiveInput) render();
+  }).catch(e => console.warn('Cloud sync init failed:', e));
 })();
