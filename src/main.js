@@ -1,5 +1,5 @@
 // ── APP SHELL — Kruew + Vimenture/Qualis Hiring Platform ─────────────────────
-import { initDB, initCloudSync, Settings, WORKSPACES } from './data/db.js';
+import { initDB, initCloudSync, syncNow, onSyncStatus, getSyncStatus, Settings, WORKSPACES } from './data/db.js';
 import { el } from './utils.js';
 import { renderDashboard } from './views/dashboard.js';
 import { renderProfiles } from './views/profiles.js';
@@ -83,6 +83,21 @@ function activeTabFor(route) {
   return route;
 }
 
+// Paint the sync status chip in place (no full re-render — never disruptive).
+function paintSyncChip(chip, st) {
+  const map = {
+    synced:  ['✓ Synced', 'sc-ok'],
+    syncing: ['⟳ Syncing…', 'sc-busy'],
+    pending: [`↑ ${st.pending || ''} pending`, 'sc-pending'],
+    offline: ['⚠ Offline', 'sc-off'],
+    error:   ['⚠ Sync error', 'sc-err'],
+    local:   ['Local only', 'sc-off'],
+  };
+  const [label, cls] = map[st.status] || map.local;
+  chip.className = `sync-chip ${cls}`;
+  chip.textContent = label;
+}
+
 function render(arg) {
   app.innerHTML = '';
 
@@ -132,6 +147,12 @@ function render(arg) {
     switcher.appendChild(b);
   });
   right.appendChild(switcher);
+  // Sync status chip (click to sync now).
+  if (isConfigured()) {
+    const chip = el('button', { class: 'sync-chip', id: 'sync-chip', title: 'Click to sync now', onclick: () => syncNow() });
+    paintSyncChip(chip, getSyncStatus());
+    right.appendChild(chip);
+  }
   // Signed-in user chip + sign out (cloud mode).
   if (isConfigured() && isAuthed()) {
     const u = currentUser();
@@ -183,16 +204,29 @@ function render(arg) {
   app.innerHTML = '<div class="main-content"><div class="card"><p class="muted">Loading…</p></div></div>';
   try { await initAuth(); } catch (e) { console.error('Auth init failed:', e); }
   render();
-  // Cloud sync: pull shared data, start write queue + periodic refresh. Re-render
-  // only when it's safe — never while the user is creating/editing. We treat the
-  // presence of ANY input/textarea/select on screen (i.e. an open form/editor) as
-  // "do not disturb", plus the detail/editor routes, so work is never interrupted.
+  // Keep the sync chip live WITHOUT ever re-rendering the page (so you're never
+  // interrupted). The chip updates in place as status changes.
+  onSyncStatus(st => {
+    const chip = document.getElementById('sync-chip');
+    if (chip) paintSyncChip(chip, st);
+  });
+
+  // Cloud sync. The periodic pull refreshes the local cache but does NOT force a
+  // re-render — fresh data appears the next time you navigate. The only auto
+  // re-render is a one-time refresh right after the FIRST pull on boot, so the
+  // initial screen reflects the server. After that, we never disrupt your work.
+  let firstPull = true;
   initCloudSync(() => {
-    const listViews = ['dashboard', 'profiles', 'results', 'futurefit', 'companies', 'placements', 'blacklist', 'team'];
-    if (!listViews.includes(current)) return;                 // not a plain list view
-    if (currentArg) return;                                   // an editor/detail is open (id or 'new')
-    // Any form field on screen means an editor is open — don't disturb.
-    if (document.querySelector('.main-content input, .main-content textarea, .main-content select')) return;
-    render(currentArg);
+    if (firstPull) {
+      firstPull = false;
+      // Safe to repaint on first load only if you're on a plain list view with
+      // nothing open/being edited.
+      const listViews = ['dashboard', 'profiles', 'results', 'futurefit', 'companies', 'placements', 'blacklist', 'team'];
+      if (listViews.includes(current) && !currentArg &&
+          !document.querySelector('.main-content input, .main-content textarea, .main-content select')) {
+        render(currentArg);
+      }
+    }
+    // Subsequent pulls: do nothing to the DOM. Data is cached; it shows on next nav.
   }).catch(e => console.warn('Cloud sync init failed:', e));
 })();

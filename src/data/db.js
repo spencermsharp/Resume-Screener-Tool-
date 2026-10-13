@@ -81,6 +81,7 @@ const backend = {
       const { enqueueUpsert, enqueueDelete } = await wq();
       if (cfg.kind === 'kv') {
         enqueueUpsert('app_kv', [{ key: cfg.kvKey, value, updated_at: new Date().toISOString() }], `kv:${cfg.kvKey}`);
+        setSyncStatus({ status: 'syncing' });
         return;
       }
       // collection: upsert changed/new items, delete removed ones.
@@ -100,14 +101,17 @@ const backend = {
           changed.push({ id: String(item.id), data: item, updated_at: stamp });
         }
       }
+      let touched = false;
       if (changed.length) {
         // Persist the _rev stamps we just set back into the local cache.
         localStorage.setItem(key, JSON.stringify(list));
         enqueueUpsert(cfg.table, changed, cfg.table);
+        touched = true;
       }
       for (const old of prevList) {
-        if (!nextIds.has(String(old.id))) enqueueDelete(cfg.table, String(old.id), 'id', cfg.table);
+        if (!nextIds.has(String(old.id))) { enqueueDelete(cfg.table, String(old.id), 'id', cfg.table); touched = true; }
       }
+      if (touched) setSyncStatus({ status: 'syncing' });
     } catch (e) { console.warn('[sync] enqueue failed', e); }
   },
 
@@ -117,10 +121,11 @@ const backend = {
     const r = await rest();
     const { pendingRecordIds } = await wq();
     const pend = pendingRecordIds();
+    let ok = true;   // false if any table failed to fetch (so status shows a problem)
     for (const [lsKey, cfg] of Object.entries(SYNC)) {
       if (cfg.kind === 'kv') {
         const rows = await r.sbSelect('app_kv');
-        if (!rows) continue;
+        if (rows == null) { ok = false; continue; }
         const row = rows.find(x => x.key === cfg.kvKey);
         if (row && row.value != null) {
           localStorage.setItem(lsKey, JSON.stringify(row.value));
@@ -135,44 +140,43 @@ const backend = {
         continue;
       }
       const rows = await r.sbSelect(cfg.table);
-      if (!rows) continue;                              // fetch failed — keep local
-      const serverItems = rows.map(x => x.data).filter(Boolean);
-      // Safety: if the server table is empty but we have local data, don't wipe
-      // local — instead push local up (first-run migration of existing data).
-      if (serverItems.length === 0) {
-        const localList = this.read(lsKey) || [];
-        if (localList.length) {
-          const { enqueueUpsert } = await wq();
-          enqueueUpsert(cfg.table, localList.map(x => ({ id: String(x.id), data: x, updated_at: new Date().toISOString() })), cfg.table);
-        }
+      if (rows == null) { ok = false; continue; }        // fetch FAILED — keep local, mark not-ok
+
+      // SOURCE OF TRUTH = SUPABASE. The local cache becomes an exact mirror of
+      // the server, EXCEPT records with un-synced pending writes (protected
+      // until they upload). This guarantees server-side deletes/edits always win.
+      const p = pend[cfg.table] || { upsert: new Set(), del: new Set() };
+      const serverById = {};
+      rows.forEach(x => { if (x && x.data) serverById[String(x.id)] = x.data; });
+
+      // Edge case: server empty + no pending + we have local data = first-run
+      // migration (push local up). Otherwise an empty server legitimately means
+      // "no records" and we mirror that.
+      const localList = this.read(lsKey) || [];
+      if (rows.length === 0 && localList.length && p.upsert.size === 0) {
+        const { enqueueUpsert } = await wq();
+        enqueueUpsert(cfg.table, localList.map(x => ({ id: String(x.id), data: x, updated_at: new Date().toISOString() })), cfg.table);
         continue;
       }
-      // Merge server with local using per-record last-write-wins:
-      //  - keep local copy if it has pending (un-synced) writes, OR
-      //  - keep local copy if its _rev is newer than the server row (a local
-      //    edit that hasn't round-tripped yet), otherwise take the server copy.
-      const p = pend[cfg.table] || { upsert: new Set(), del: new Set() };
-      const localList = this.read(lsKey) || [];
+
       const localById = {}; localList.forEach(x => { localById[String(x.id)] = x; });
       const merged = [];
-      for (const srv of serverItems) {
-        const id = String(srv.id);
-        if (p.del.has(id)) continue;                      // locally deleted, pending
-        const loc = localById[id];
-        if (loc && p.upsert.has(id)) { merged.push(loc); continue; }  // pending edit wins
-        if (loc && loc._rev && (!srv._rev || loc._rev > srv._rev)) { merged.push(loc); continue; } // fresher local wins
-        merged.push(srv);
+      // 1) Everything the server has (authoritative).
+      for (const id of Object.keys(serverById)) {
+        if (p.del.has(id)) continue;                     // we deleted it locally, not yet synced
+        if (p.upsert.has(id) && localById[id]) merged.push(localById[id]); // our pending edit wins until it uploads
+        else merged.push(serverById[id]);
       }
-      // Re-add local-only records ONLY if they have a pending upload (brand-new,
-      // still syncing). A local-only record with no pending write was deleted on
-      // another device, so we must NOT resurrect it.
+      // 2) Local records NOT on the server — keep ONLY if pending upload (brand
+      //    new, still syncing). Anything else local-only = deleted elsewhere → drop.
       localList.forEach(loc => {
         const id = String(loc.id);
-        if (merged.some(x => String(x.id) === id)) return;
+        if (serverById[id]) return;
         if (p.upsert.has(id)) merged.push(loc);
       });
       localStorage.setItem(lsKey, JSON.stringify(merged));
     }
+    return ok;
   },
 };
 
@@ -596,22 +600,55 @@ export const Stages = {
 // Call once after initDB(). Pulls shared data from Supabase into the local cache,
 // starts the durable write-queue worker, and polls periodically so other devices'
 // changes appear. Safe no-op when Supabase isn't configured.
+// ── SYNC STATUS (observable) ──────────────────────────────────────────────────
+// status: 'synced' | 'syncing' | 'pending' | 'offline' | 'error' | 'local'
+const _syncState = { status: 'local', pending: 0, lastSync: null };
+const _syncListeners = new Set();
+export function onSyncStatus(fn) { _syncListeners.add(fn); fn(_syncState); return () => _syncListeners.delete(fn); }
+export function getSyncStatus() { return { ..._syncState }; }
+function setSyncStatus(patch) { Object.assign(_syncState, patch); _syncListeners.forEach(fn => { try { fn(_syncState); } catch {} }); }
+
+let _syncing = false;
+let _onPulledCb = null;
+
+// Run one full sync cycle: push the queue, then pull from Supabase (source of
+// truth). Updates the status signal throughout. Safe to call manually.
+export async function syncNow() {
+  const { isConfigured } = await import('../auth/supabaseClient.js');
+  if (!isConfigured()) { setSyncStatus({ status: 'local' }); return; }
+  if (_syncing) return;
+  _syncing = true;
+  const { drainQueue, hasPendingWrites, queueStatus } = await import('./writeQueue.js');
+  try {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setSyncStatus({ status: 'offline', pending: queueStatus().pending });
+      return;
+    }
+    setSyncStatus({ status: 'syncing' });
+    await drainQueue();                       // push local changes up first
+    const ok = await backend.pullAll();       // then mirror server down
+    const pending = queueStatus().pending;
+    if (!ok) setSyncStatus({ status: 'error', pending });
+    else if (pending > 0 || hasPendingWrites()) setSyncStatus({ status: 'pending', pending });
+    else setSyncStatus({ status: 'synced', pending: 0, lastSync: new Date().toISOString() });
+    if (_onPulledCb) _onPulledCb();
+  } catch (e) {
+    console.warn('[sync] cycle failed', e);
+    setSyncStatus({ status: 'error' });
+  } finally {
+    _syncing = false;
+  }
+}
+
 export async function initCloudSync(onPulled) {
   const { isConfigured } = await import('../auth/supabaseClient.js');
-  if (!isConfigured()) return;
-  const { startQueueWorker, drainQueue } = await import('./writeQueue.js');
-  try { await backend.pullAll(); if (onPulled) onPulled(); } catch (e) { console.warn('[sync] initial pull failed', e); }
+  if (!isConfigured()) { setSyncStatus({ status: 'local' }); return; }
+  _onPulledCb = onPulled;
+  const { startQueueWorker } = await import('./writeQueue.js');
   startQueueWorker(5000);
-  // Periodic pull so changes from other devices show up (every 15s), but skip
-  // while we have unsynced local writes to avoid clobbering them mid-flight.
-  setInterval(async () => {
-    try {
-      const { hasPendingWrites } = await import('./writeQueue.js');
-      if (hasPendingWrites()) { drainQueue(); return; }
-      await backend.pullAll();
-      if (onPulled) onPulled();
-    } catch { /* keep going */ }
-  }, 15000);
+  await syncNow();                            // initial sync
+  setInterval(syncNow, 15000);                // periodic source-of-truth refresh
+  if (typeof window !== 'undefined') window.addEventListener('online', syncNow);
 }
 
 // ── SETTINGS REPOSITORY ───────────────────────────────────────────────────────
