@@ -262,8 +262,8 @@ export function renderUpload(navigate) {
             // Dedupe/known-person detection BEFORE screening.
             const struct = lightStructure(res.rawText);
             const nm = struct.name || displayName;
-            const banned = Blacklist.match({ name: nm, email: struct.email });
-            const known = banned ? null : People.match({ name: nm, email: struct.email });
+            const banned = Blacklist.match({ name: nm, email: struct.email, phone: struct.phone });
+            const known = banned ? null : People.match({ name: nm, email: struct.email, phone: struct.phone });
             toScreen.push({ fileName: displayName, rawText: res.rawText, file: f, _struct: struct, _banned: banned, _known: known });
           } else {
             skipped.push({ name: displayName, reason: res.reason || 'Could not read file.' });
@@ -289,21 +289,33 @@ export function renderUpload(navigate) {
 
       // ── Phase 2: screen each candidate ──────────────────────────────────
       const created = [];
+      const duplicates = [];   // {name, stageLabel} — same person, same position
       const dedupe = { newN: 0, knownN: 0, bannedN: 0 };
       for (const item of toScreen) {
-        if (item._banned) dedupe.bannedN++; else if (item._known) dedupe.knownN++; else dedupe.newN++;
         const who = item.name || item.fileName || 'Pasted text';
         label.textContent = `Screening ${who}`;
         await tick();
         try {
           const struct = item._struct || lightStructure(item.rawText);
+
+          // DUPLICATE CHECK (same person + same position, by email/phone):
+          // resolve the person this resume belongs to, and if they already have
+          // an application for THIS position, skip — keep the original.
+          const person = People.match({ name: item.name || struct.name, email: struct.email, phone: struct.phone });
+          if (person) {
+            const dup = Candidates.findDuplicate(person.id, profileId);
+            if (dup) {
+              duplicates.push({ name: who, stageLabel: Stages.label(dup.stage), id: dup.id });
+              done++; paint();
+              continue; // don't create a second application
+            }
+          }
+
+          if (item._banned) dedupe.bannedN++; else if (item._known) dedupe.knownN++; else dedupe.newN++;
+
           const result = await screenCandidate(item.rawText, profile);
-          // Blackball check: if this person is on the shared do-not-hire list,
-          // they start at "Out" regardless of score.
-          const banned = item._banned || Blacklist.match({ name: item.name || struct.name, email: struct.email });
+          const banned = item._banned || Blacklist.match({ name: item.name || struct.name, email: struct.email, phone: struct.phone });
           const startStage = banned ? 'out' : 'screened';
-          // Persist the original PDF on the server so the detail page can
-          // preview it (survives reloads). Non-PDFs just skip this.
           let pdfUrl = '';
           const isPdfFile = item.file && (item.file.type === 'application/pdf' || /\.pdf$/i.test(item.file.name || ''));
           if (isPdfFile) {
@@ -321,7 +333,7 @@ export function renderUpload(navigate) {
             stage: startStage,
           });
           if (banned) {
-            Candidates.setStage(cand.id, 'out', `Auto-moved to Out — blackball match (${banned.email || banned.name}).`);
+            Candidates.setStage(cand.id, 'out', `Auto-moved to Out — blackball match (${banned.email || banned.name || banned.phone}).`);
           }
           created.push(cand);
         } catch (err) {
@@ -331,7 +343,7 @@ export function renderUpload(navigate) {
         paint();
       }
       label.textContent = 'Done';
-      renderResults(created, skipped, profile, navigate, resultMount, dedupe);
+      renderResults(created, skipped, profile, navigate, resultMount, dedupe, duplicates);
     } catch (err) {
       resultMount.innerHTML = '';
       const card = el('div', { class: 'card' });
@@ -351,7 +363,7 @@ export function renderUpload(navigate) {
   return wrap;
 }
 
-function renderResults(created, skipped, profile, navigate, mount, dedupe) {
+function renderResults(created, skipped, profile, navigate, mount, dedupe, duplicates) {
   mount.innerHTML = '';
   const card = el('div', { class: 'card' });
   card.appendChild(el('div', { class: 'card-header' }, el('h2', {}, 'Screening Complete')));
@@ -363,6 +375,14 @@ function renderResults(created, skipped, profile, navigate, mount, dedupe) {
     if (dedupe.knownN) bits.push(`${dedupe.knownN} already in your system`);
     if (dedupe.bannedN) bits.push(`${dedupe.bannedN} blackballed → auto-moved to Out`);
     d.innerHTML = `👤 ${bits.join(' · ')}.`;
+    card.appendChild(d);
+  }
+
+  // Duplicate summary — same person already applied to THIS position.
+  if (duplicates && duplicates.length) {
+    const d = el('div', { class: 'banner banner-warn' });
+    d.innerHTML = `♊ ${duplicates.length} duplicate(s) skipped (same person already applied to this role):<br>`
+      + duplicates.map(x => `• ${esc(x.name)} — kept the existing application (currently ${esc(x.stageLabel)})`).join('<br>');
     card.appendChild(d);
   }
 

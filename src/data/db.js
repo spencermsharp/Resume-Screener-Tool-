@@ -387,15 +387,20 @@ export const Profiles = {
 export const People = {
   all() { return backend.read(KEYS.people) || []; },
   get(id) { return this.all().find(p => p.id === id) || null; },
-  match({ name, email }) {
-    const e = normEmail(email), n = normName(name);
-    // Email is the identity key (people can share a name). Only fall back to a
-    // name match when neither side has an email to compare.
-    if (e) return this.all().find(p => normEmail(p.email) === e) || null;
-    return this.all().find(p => !p.email && n && normName(p.name) === n) || null;
+  match({ name, email, phone }) {
+    const target = { email, phone };
+    // Identity = email OR phone (people can share a name). Match on either.
+    const byContact = this.all().find(p => sameContact(p, target));
+    if (byContact) return byContact;
+    // Last resort: name only when the incoming person has NO email/phone at all.
+    if (!normEmail(email) && !normPhone(phone)) {
+      const n = normName(name);
+      return this.all().find(p => !p.email && !p.phone && n && normName(p.name) === n) || null;
+    }
+    return null;
   },
   findOrCreate({ name, email, phone }) {
-    const existing = this.match({ name, email });
+    const existing = this.match({ name, email, phone });
     if (existing) {
       // Backfill missing contact info if this sighting has more.
       const patch = {};
@@ -439,6 +444,12 @@ export const Candidates = {
   byProfile(profileId) { return this.all().filter(c => c.profileId === profileId); },
   byStage(profileId, stageId) { return this.byProfile(profileId).filter(c => c.stage === stageId); },
   byPerson(personId) { return this.all().filter(c => c.personId === personId); },
+  // Find an existing application for the SAME person on the SAME position — a
+  // duplicate (same person applying to the same role from different sources).
+  findDuplicate(personId, profileId) {
+    if (!personId || !profileId) return null;
+    return this.all().find(c => c.personId === personId && c.profileId === profileId) || null;
+  },
   create(data) {
     const list = this.all();
     const stamp = new Date().toISOString();
@@ -620,6 +631,19 @@ export const Settings = {
  */
 function normName(s) { return String(s || '').trim().toLowerCase().replace(/\s+/g, ' '); }
 function normEmail(s) { return String(s || '').trim().toLowerCase(); }
+// Phone: keep digits only, and compare the last 10 (ignores country code / formatting).
+function normPhone(s) {
+  const d = String(s || '').replace(/\D/g, '');
+  return d.length > 10 ? d.slice(-10) : d;
+}
+// Two contacts are the same person if EMAIL matches OR PHONE matches.
+function sameContact(a, b) {
+  const ae = normEmail(a.email), be = normEmail(b.email);
+  if (ae && be && ae === be) return true;
+  const ap = normPhone(a.phone), bp = normPhone(b.phone);
+  if (ap && bp && ap === bp && ap.length >= 7) return true;
+  return false;
+}
 
 export const Blacklist = {
   all() { return backend.read(KEYS.blacklist) || []; },
@@ -629,6 +653,7 @@ export const Blacklist = {
       id: uid('BAN'),
       name: data.name || '',
       email: data.email || '',
+      phone: data.phone || '',
       reason: data.reason || '',
       addedAt: new Date().toISOString(),
     };
@@ -637,14 +662,17 @@ export const Blacklist = {
     return entry;
   },
   remove(id) { backend.write(KEYS.blacklist, this.all().filter(e => e.id !== id)); },
-  // Match a candidate against the blacklist. EMAIL is the identity key (people
-  // can share a name), so we match by email first. Name is only a fallback when
-  // the candidate has no email AND the blacklist entry has no email.
-  match({ name, email }) {
-    const e = normEmail(email), n = normName(name);
-    if (e) return this.all().find(b => normEmail(b.email) === e) || null;
-    // No email on the candidate — fall back to name against entries without email.
-    return this.all().find(b => !b.email && n && normName(b.name) === n) || null;
+  // Match a candidate against the blacklist by EMAIL or PHONE (people can share
+  // a name). Name is only a fallback when neither side has contact info.
+  match({ name, email, phone }) {
+    const target = { email, phone };
+    const byContact = this.all().find(b => sameContact(b, target));
+    if (byContact) return byContact;
+    if (!normEmail(email) && !normPhone(phone)) {
+      const n = normName(name);
+      return this.all().find(b => !b.email && !b.phone && n && normName(b.name) === n) || null;
+    }
+    return null;
   },
 };
 

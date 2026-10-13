@@ -21,6 +21,7 @@ export function renderBlacklist(navigate) {
   form.innerHTML = `
     <div class="form-group"><label>Full name</label><input id="bl-name" placeholder="e.g. John Doe" /></div>
     <div class="form-group"><label>Email</label><input id="bl-email" type="email" placeholder="john@example.com" /></div>
+    <div class="form-group"><label>Phone</label><input id="bl-phone" placeholder="e.g. +1 555 123 4567" /></div>
   `;
   addCard.appendChild(form);
   const reason = el('div', { class: 'form-group' });
@@ -29,8 +30,9 @@ export function renderBlacklist(navigate) {
   const addBtn = el('button', { class: 'btn btn-primary', onclick: () => {
     const name = addCard.querySelector('#bl-name').value.trim();
     const email = addCard.querySelector('#bl-email').value.trim();
-    if (!name && !email) return;
-    Blacklist.add({ name, email, reason: addCard.querySelector('#bl-reason').value.trim() });
+    const phone = addCard.querySelector('#bl-phone').value.trim();
+    if (!name && !email && !phone) return;
+    Blacklist.add({ name, email, phone, reason: addCard.querySelector('#bl-reason').value.trim() });
     // Retro-apply: drop any already-screened candidate who matches to "Out".
     applyToExisting();
     navigate('blacklist');
@@ -47,13 +49,14 @@ export function renderBlacklist(navigate) {
     card.appendChild(e);
   } else {
     const table = el('table');
-    table.innerHTML = `<thead><tr><th>Name</th><th>Email</th><th>Reason</th><th style="width:110px">Added</th><th style="width:90px"></th></tr></thead>`;
+    table.innerHTML = `<thead><tr><th>Name</th><th>Email</th><th>Phone</th><th>Reason</th><th style="width:110px">Added</th><th style="width:90px"></th></tr></thead>`;
     const tb = el('tbody');
     list.forEach(b => {
       const tr = el('tr');
       tr.innerHTML = `
         <td><strong>${esc(b.name || '—')}</strong></td>
         <td>${esc(b.email || '—')}</td>
+        <td>${esc(b.phone || '—')}</td>
         <td class="muted">${esc(b.reason || '')}</td>
         <td class="muted">${fmtDate(b.addedAt)}</td>`;
       const td = el('td');
@@ -75,7 +78,7 @@ export function renderBlacklist(navigate) {
 function applyToExisting() {
   Candidates.all().forEach(c => {
     if (c.stage === 'out') return;
-    const hit = Blacklist.match({ name: c.name || c.parsed?.name, email: c.parsed?.email });
-    if (hit) Candidates.setStage(c.id, 'out', `Auto-moved to Out — blackball match (${hit.email || hit.name}).`);
+    const hit = Blacklist.match({ name: c.name || c.parsed?.name, email: c.parsed?.email, phone: c.parsed?.phone });
+    if (hit) Candidates.setStage(c.id, 'out', `Auto-moved to Out — blackball match (${hit.email || hit.phone || hit.name}).`);
   });
 }
