@@ -345,3 +345,6 @@ h3 { font-size: 14px; font-weight: 600; }
 .pf-person { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 8px; cursor: pointer; font-size: 13px; }
 .pf-person:hover { background: var(--surface2); }
 @media (max-width: 600px) { .pf-label { width: 120px; } }
+
+/* ── RESULTS CONTEXT HEADER ──────────────────────────────────────────────── */
+.results-context { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:10px 0 2px; border-top:1px solid var(--border); }

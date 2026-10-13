@@ -1,5 +1,5 @@
 // ── RESULTS (RANKED) + PIPELINE + CANDIDATE DETAIL VIEW ───────────────────────
-import { Profiles, Candidates, People, Stages, Settings, REJECT_REASONS } from '../data/db.js';
+import { Profiles, Candidates, Companies, People, Stages, Settings, REJECT_REASONS } from '../data/db.js';
 import { el, esc, fmtDate, scoreClass, scoreLabel } from '../utils.js';
 import { confirm as confirmDialog, open as openModal } from '../ui/modal.js';
 import { currentUser } from '../auth/auth.js';
@@ -11,6 +11,8 @@ let resultsView = 'ranked';
 let resultsFilter = 'active';
 // Compare selection (candidate ids) — session-scoped.
 let compareSel = new Set();
+// Company filter for the position picker ('' = all).
+let resultsCompany = '';
 
 // Maps a stage kind to a badge color class.
 function stageBadgeClass(stageId) {
@@ -24,25 +26,77 @@ export function renderResults(navigate, profileId) {
   const profiles = Profiles.byWorkspace(Settings.workspace());
   const wrap = el('div');
 
-  const activeId = profileId || (profiles[0] && profiles[0].id) || null;
-  const bar = el('div', { class: 'card' });
-  const head = el('div', { class: 'card-header' }, el('h2', {}, 'Candidates'));
-  const sel = el('select', { style: 'max-width:280px' });
-  profiles.forEach(p => {
-    const o = el('option', { value: p.id }, p.role + (p.status === 'archived' ? ' (archived)' : ''));
-    if (p.id === activeId) o.setAttribute('selected', 'selected');
-    sel.appendChild(o);
-  });
-  sel.addEventListener('change', () => navigate('results', sel.value));
-  head.appendChild(sel);
-  bar.appendChild(head);
+  const ws = Settings.workspace();
+  const companyName = p => ws === 'staffing' ? (Companies.name(p.companyId) || 'Unassigned') : (p.company || '—');
 
-  if (!activeId) {
+  const bar = el('div', { class: 'card' });
+  bar.appendChild(el('div', { class: 'card-header' }, el('h2', {}, 'Candidates')));
+
+  if (!profiles.length) {
     const e = el('div', { class: 'empty' });
-    e.innerHTML = `<div class="big">🧩</div><p>No positions yet.</p>`;
+    e.innerHTML = `<div class="big">🧩</div><p>No positions yet. Create one under Job Positions.</p>`;
     bar.appendChild(e);
     wrap.appendChild(bar);
     return wrap;
+  }
+
+  // Company filter + position picker (shows company, title, candidate count).
+  const companies = [...new Set(profiles.map(companyName))].sort();
+  if (resultsCompany && !companies.includes(resultsCompany)) resultsCompany = '';
+  const inCompany = resultsCompany ? profiles.filter(p => companyName(p) === resultsCompany) : profiles;
+
+  const activeId = (profileId && inCompany.some(p => p.id === profileId))
+    ? profileId
+    : (inCompany[0] && inCompany[0].id) || null;
+
+  const pickRow = el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px' });
+
+  // Company filter
+  const coSel = el('select', { style: 'max-width:220px' });
+  coSel.appendChild(el('option', { value: '' }, `All companies (${profiles.length})`));
+  companies.forEach(cn => {
+    const n = profiles.filter(p => companyName(p) === cn).length;
+    const o = el('option', { value: cn }, `${cn} (${n})`);
+    if (cn === resultsCompany) o.setAttribute('selected', 'selected');
+    coSel.appendChild(o);
+  });
+  coSel.addEventListener('change', () => { resultsCompany = coSel.value; navigate('results'); });
+  pickRow.appendChild(labeled('Company', coSel));
+
+  // Position picker — label shows company · role · candidate count.
+  const sel = el('select', { style: 'min-width:320px;flex:1' });
+  inCompany
+    .slice()
+    .sort((a, b) => companyName(a).localeCompare(companyName(b)) || a.role.localeCompare(b.role))
+    .forEach(p => {
+      const n = Candidates.byProfile(p.id).filter(c => c.result).length;
+      const arch = p.status === 'archived' ? ' · archived' : '';
+      const o = el('option', { value: p.id }, `${companyName(p)} — ${p.role} · ${n} candidate${n === 1 ? '' : 's'}${arch}`);
+      if (p.id === activeId) o.setAttribute('selected', 'selected');
+      sel.appendChild(o);
+    });
+  sel.addEventListener('change', () => navigate('results', sel.value));
+  pickRow.appendChild(labeled('Position', sel));
+  bar.appendChild(pickRow);
+
+  if (!activeId) {
+    const e = el('div', { class: 'empty' });
+    e.innerHTML = `<div class="big">🧩</div><p>No positions for this company.</p>`;
+    bar.appendChild(e);
+    wrap.appendChild(bar);
+    return wrap;
+  }
+
+  // Clear "what you're looking at" header line.
+  const selProf = Profiles.get(activeId);
+  if (selProf) {
+    const ctx = el('div', { class: 'results-context' });
+    ctx.innerHTML = `
+      <span class="badge badge-gray">${esc(companyName(selProf))}</span>
+      <strong style="font-size:15px">${esc(selProf.role)}</strong>
+      ${selProf.priority === 'urgent' ? '<span class="badge badge-red">Urgent</span>' : ''}
+      ${selProf.status === 'archived' ? '<span class="badge badge-gray">Archived</span>' : ''}`;
+    bar.appendChild(ctx);
   }
 
   // Ranked / Pipeline toggle
@@ -526,6 +580,14 @@ function fmtDateTime(iso) {
 function miniField(label, val) {
   const d = el('div');
   d.innerHTML = `<div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.05em">${label}</div><div>${esc(val || '—')}</div>`;
+  return d;
+}
+
+// Small labeled form control wrapper.
+function labeled(label, control) {
+  const d = el('div', { class: 'form-group', style: 'margin:0' });
+  d.appendChild(el('label', {}, label));
+  d.appendChild(control);
   return d;
 }
 
