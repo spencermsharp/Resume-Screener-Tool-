@@ -125,6 +125,7 @@ const backend = {
     for (const [lsKey, cfg] of Object.entries(SYNC)) {
       if (cfg.kind === 'kv') {
         const rows = await r.sbSelect('app_kv');
+        if (rows === r.TABLE_MISSING) continue;            // table not created yet — skip quietly
         if (rows == null) { ok = false; continue; }
         const row = rows.find(x => x.key === cfg.kvKey);
         if (row && row.value != null) {
@@ -140,6 +141,7 @@ const backend = {
         continue;
       }
       const rows = await r.sbSelect(cfg.table);
+      if (rows === r.TABLE_MISSING) continue;            // table not created yet — skip quietly
       if (rows == null) { ok = false; continue; }        // fetch FAILED — keep local, mark not-ok
 
       // SOURCE OF TRUTH = SUPABASE. The local cache becomes an exact mirror of

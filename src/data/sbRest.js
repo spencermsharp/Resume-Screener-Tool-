@@ -18,13 +18,19 @@ function headers() {
 // 4xx (except 408/429) = permanent (bad request / RLS) — don't blind-retry.
 function isPermanentStatus(s) { return s >= 400 && s < 500 && s !== 408 && s !== 429; }
 
-// Select all rows from a table. Returns array, or null on failure (so callers
-// never overwrite local data with a partial/failed read).
+// Sentinel returned when a table doesn't exist yet (404) — callers skip it
+// quietly instead of treating it as a sync failure.
+export const TABLE_MISSING = Symbol('table_missing');
+
+// Select all rows from a table. Returns an array on success, TABLE_MISSING if
+// the table doesn't exist (404), or null on any other failure (so callers never
+// overwrite local data with a partial/failed read).
 export async function sbSelect(table) {
   if (!isConfigured()) return null;
   const { supabaseUrl } = getConfig();
   try {
     const r = await fetch(`${supabaseUrl}/rest/v1/${table}?select=*`, { headers: headers() });
+    if (r.status === 404) { console.warn(`[sb] table '${table}' not found (run the schema)`); return TABLE_MISSING; }
     if (!r.ok) { console.error(`[sb] select ${table} failed ${r.status}`); return null; }
     const rows = await r.json();
     return Array.isArray(rows) ? rows : null;
