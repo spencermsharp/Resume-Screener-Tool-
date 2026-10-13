@@ -344,6 +344,7 @@ export const Profiles = {
       payBudget: parseFloat(data.payBudget) || 0,     // worker pay budget
       payCurrency: data.payCurrency || 'USD',         // 'USD' | 'PHP'
       priority: data.priority || 'normal',            // 'normal' | 'urgent'
+      ownerId: data.ownerId || '',          // user who owns this position
       status: 'open',
       openedAt: today(),
       archivedAt: null,

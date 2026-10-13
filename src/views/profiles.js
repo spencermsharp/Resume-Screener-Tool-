@@ -5,6 +5,7 @@
 import { Profiles, Candidates, Companies, Settings, WORKSPACES, EXAMPLE_ROLE_TEMPLATES } from '../data/db.js';
 import { el, esc, uid, daysOpenLabel, fmtDate } from '../utils.js';
 import { confirm as confirmDialog, alert as alertDialog } from '../ui/modal.js';
+import { Users } from '../auth/auth.js';
 
 // Remember which tab (open/archived) the user last viewed, within the session.
 let listFilter = 'open';
@@ -98,9 +99,11 @@ function renderList(navigate) {
     const staffing = ws === 'staffing';
     const money = n => '$' + (Math.round((parseFloat(n) || 0) * 100) / 100).toLocaleString('en-US');
     const table = el('table');
+    const ownerName = p => { if (!p.ownerId) return '—'; const u = Users.all().find(x => x.id === p.ownerId); return u ? (u.name || u.username) : '—'; };
     table.innerHTML = `<thead><tr>
       <th>Position</th>
       <th>${staffing ? 'Client' : 'Company'}</th>
+      <th>Owner</th>
       ${staffing ? '<th>Bill/mo</th><th>Margin/mo</th>' : '<th>Criteria</th>'}
       <th>Resumes</th>
       <th>${isArchived ? 'Archived' : 'Days open'}</th><th></th>
@@ -113,11 +116,13 @@ function renderList(navigate) {
       const roleCell = `<strong>${esc(p.role)}</strong>${p.priority === 'urgent' ? ' <span class="badge badge-red">Urgent</span>' : ''}<div class="muted" style="font-size:12px">${esc(p.summary || '')}</div>`;
       const co = esc(companyName(p));
       const tr = el('tr');
+      const ownerCell = `<span class="muted">${esc(ownerName(p))}</span>`;
       if (staffing) {
         const m = Profiles.margin(p);
         tr.innerHTML = `
           <td>${roleCell}</td>
           <td>${co}</td>
+          <td>${ownerCell}</td>
           <td class="mono">${p.billRate ? money(p.billRate) : '—'}</td>
           <td class="mono ${m >= 0 ? 'text-green' : 'text-red'}">${p.billRate || p.payBudget ? money(m) : '—'}</td>
           <td>${resumeCount}</td>
@@ -126,6 +131,7 @@ function renderList(navigate) {
         tr.innerHTML = `
           <td>${roleCell}</td>
           <td><span class="badge badge-gray">${co}</span></td>
+          <td>${ownerCell}</td>
           <td>${(p.criteria || []).length} <span class="muted">(${req} required)</span></td>
           <td>${resumeCount}</td>
           <td>${esc(timing)}</td>`;
@@ -167,6 +173,7 @@ function renderEditor(navigate, profile) {
     threshold: profile?.threshold != null ? profile.threshold : 60,
     workspace: profile?.workspace || ws,
     company: profile?.company || (ws === 'internal' ? 'Vimenture' : ''),
+    ownerId: profile?.ownerId || '',
     // Staffing commercial fields.
     companyId: profile?.companyId || '',
     billRate: profile?.billRate || '',
@@ -197,6 +204,14 @@ function renderEditor(navigate, profile) {
       <label>Interview threshold (%)</label>
       <input id="p-threshold" type="number" min="0" max="100" step="1" value="${draft.threshold}" />
       <div class="tag-hint">Candidates scoring below this are flagged "below threshold". Nothing is auto-rejected — you decide.</div>
+    </div>
+    <div class="form-group">
+      <label>Owner</label>
+      <select id="p-owner">
+        <option value="">— Unassigned —</option>
+        ${Users.all().filter(u => u.status !== 'disabled').map(u => `<option value="${esc(u.id)}"${draft.ownerId === u.id ? ' selected' : ''}>${esc(u.name || u.username)}</option>`).join('')}
+      </select>
+      <div class="tag-hint">The recruiter responsible for this position.</div>
     </div>
     ${draft.workspace === 'internal' ? `
     <div class="form-group">
@@ -373,6 +388,7 @@ function renderEditor(navigate, profile) {
       threshold: Math.max(0, Math.min(100, parseInt(form.querySelector('#p-threshold').value, 10) || 0)),
       workspace: draft.workspace,
       company: companyEl ? companyEl.value : draft.company,
+      ownerId: form.querySelector('#p-owner').value,
       criteria: draft.criteria,
     };
     // Staffing commercial fields (only present in staffing mode).
