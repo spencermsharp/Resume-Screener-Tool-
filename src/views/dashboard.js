@@ -2,6 +2,9 @@
 import { Profiles, Candidates, Settings, Stages } from '../data/db.js';
 import { el, esc } from '../utils.js';
 
+// Selected efficiency date range (session-scoped): '30'|'90'|'180'|'365'|'all'.
+let dashRange = '90';
+
 export function renderDashboard(navigate) {
   const ws = Settings.workspace();
   const profiles = Profiles.byWorkspace(ws);
@@ -46,19 +49,56 @@ export function renderDashboard(navigate) {
   );
   wrap.appendChild(roi);
 
-  // ── Efficiency metrics (the insightful stuff) ─────────────────────────────
-  wrap.appendChild(el('div', { class: 'section-label', style: 'font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--text2);margin:26px 0 10px;font-weight:600' }, 'Hiring efficiency'));
+  // ── Efficiency metrics with date range + prior-period comparison ──────────
+  const effHeader = el('div', { style: 'display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin:26px 0 10px' });
+  effHeader.appendChild(el('div', { class: 'section-label', style: 'font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--text2);font-weight:600;margin:0' }, 'Hiring efficiency'));
+  const rangeSel = el('select', { style: 'max-width:200px' });
+  [['30', 'Last 30 days'], ['90', 'Last 90 days'], ['180', 'Last 6 months'], ['365', 'Last 12 months'], ['all', 'All time']]
+    .forEach(([v, l]) => { const o = el('option', { value: v }, l); if (v === dashRange) o.setAttribute('selected', 'selected'); rangeSel.appendChild(o); });
+  rangeSel.addEventListener('change', () => { dashRange = rangeSel.value; navigate('dashboard'); });
+  effHeader.appendChild(rangeSel);
+  wrap.appendChild(effHeader);
 
-  const avgTimeToHire = avgDaysToHire(hired);
-  const avgInterviewedPerHire = hired.length ? Math.round(interviewed / hired.length * 10) / 10 : null;
-  const avgTimeToFill = avgDaysToFill(profiles);
-  const offerAccept = offerAcceptRate(candidates);
+  // Build current + prior windows for comparison.
+  const now = Date.now();
+  const dayMs = 86400000;
+  const span = dashRange === 'all' ? null : parseInt(dashRange, 10) * dayMs;
+  const curStart = span ? now - span : 0;
+  const priorStart = span ? now - 2 * span : 0;
+  const priorEnd = curStart;
+
+  // A candidate "counts" in a window if its hire (or screen) happened within it.
+  const hiredAtIn = (c, start, end) => {
+    const e = [...(c.stageHistory || [])].reverse().find(h => { const s = Stages.get(h.stage); return s && s.kind === 'hired'; });
+    if (!e) return false; const t = new Date(e.at).getTime();
+    return t >= start && (end == null || t < end);
+  };
+  const screenedIn = (c, start, end) => { const t = new Date(c.createdAt).getTime(); return t >= start && (end == null || t < end); };
+
+  const curHired = hired.filter(c => span ? hiredAtIn(c, curStart, null) : true);
+  const priorHired = span ? hired.filter(c => hiredAtIn(c, priorStart, priorEnd)) : [];
+  const curScreened = candidates.filter(c => span ? screenedIn(c, curStart, null) : true);
+  const priorScreened = span ? candidates.filter(c => screenedIn(c, priorStart, priorEnd)) : [];
+  const curInterviewed = curScreened.filter(c => (c.stageHistory || []).some(h => { const s = Stages.get(h.stage); return s && s.kind === 'interview'; })).length;
+
+  const m = {
+    tth: avgDaysToHire(curHired),
+    perHire: curHired.length ? Math.round(curInterviewed / curHired.length * 10) / 10 : null,
+    fill: avgDaysToFill(profiles, curStart),
+    accept: offerAcceptRate(curScreened),
+  };
+  const pm = span ? {
+    tth: avgDaysToHire(priorHired),
+    perHire: priorHired.length ? Math.round(priorScreened.filter(c => (c.stageHistory || []).some(h => { const s = Stages.get(h.stage); return s && s.kind === 'interview'; })).length / priorHired.length * 10) / 10 : null,
+    fill: avgDaysToFill(profiles, priorStart, priorEnd),
+    accept: offerAcceptRate(priorScreened),
+  } : {};
 
   const eff = el('div', { class: 'grid grid-4' },
-    kpi('Avg Time to Hire', avgTimeToHire != null ? `${avgTimeToHire}d` : '—', 'screened → hired'),
-    kpi('Interviewed / Hire', avgInterviewedPerHire != null ? avgInterviewedPerHire : '—', 'candidates per hire'),
-    kpi('Avg Time to Fill', avgTimeToFill != null ? `${avgTimeToFill}d` : '—', 'position opened → filled'),
-    kpi('Offer Accept Rate', offerAccept != null ? `${offerAccept}%` : '—', 'offers → hires'),
+    kpiTrend('Avg Time to Hire', m.tth, pm.tth, 'd', 'lower is better', true),
+    kpiTrend('Interviewed / Hire', m.perHire, pm.perHire, '', 'candidates per hire', true),
+    kpiTrend('Avg Time to Fill', m.fill, pm.fill, 'd', 'opened → filled', true),
+    kpiTrend('Offer Accept Rate', m.accept, pm.accept, '%', 'offers → hires', false),
   );
   wrap.appendChild(eff);
 
@@ -194,18 +234,43 @@ function avgDaysToHire(hired) {
   if (!spans.length) return null;
   return Math.round(spans.reduce((a, b) => a + b, 0) / spans.length);
 }
-// Avg days a filled position was open (openedAt → first hire among its candidates).
-function avgDaysToFill(profiles) {
+// Avg days a filled position was open (openedAt → first hire). Optional window
+// filters by when the hire happened: [winStart, winEnd) in ms epoch.
+function avgDaysToFill(profiles, winStart, winEnd) {
   const spans = [];
   profiles.forEach(p => {
     const hires = Candidates.byProfile(p.id).filter(c => { const s = Stages.get(c.stage); return s && s.kind === 'hired'; });
     if (!hires.length) return;
     const hireEntry = hires.map(c => [...(c.stageHistory || [])].reverse().find(h => { const s = Stages.get(h.stage); return s && s.kind === 'hired'; })).filter(Boolean).sort((a, b) => String(a.at).localeCompare(String(b.at)))[0];
     const opened = p.openedAt || p.createdAt;
-    if (opened && hireEntry) { const d = daysBetweenIso(opened, hireEntry.at); if (d != null) spans.push(d); }
+    if (!opened || !hireEntry) return;
+    if (winStart != null) { const t = new Date(hireEntry.at).getTime(); if (t < winStart || (winEnd != null && t >= winEnd)) return; }
+    const d = daysBetweenIso(opened, hireEntry.at); if (d != null) spans.push(d);
   });
   if (!spans.length) return null;
   return Math.round(spans.reduce((a, b) => a + b, 0) / spans.length);
+}
+
+// A KPI card that shows the value plus the change vs the prior period.
+// lowerIsBetter flips the color of the delta (e.g. time-to-hire going down = good).
+function kpiTrend(label, val, prior, unit, sub, lowerIsBetter) {
+  const d = el('div', { class: 'kpi' });
+  const show = v => v == null ? '—' : `${v}${unit}`;
+  let delta = '';
+  if (val != null && prior != null && prior !== 0) {
+    const diff = val - prior;
+    if (diff !== 0) {
+      const good = lowerIsBetter ? diff < 0 : diff > 0;
+      const arrow = diff > 0 ? '▲' : '▼';
+      delta = `<span class="kpi-delta ${good ? 'kd-good' : 'kd-bad'}">${arrow} ${Math.abs(diff).toFixed(unit === '' ? 1 : 0)}${unit} vs prior</span>`;
+    } else {
+      delta = `<span class="kpi-delta">no change</span>`;
+    }
+  } else if (val != null && prior != null && prior === 0) {
+    delta = `<span class="kpi-delta">new</span>`;
+  }
+  d.innerHTML = `<div class="label">${label}</div><div class="value">${show(val)}</div><div class="sub">${sub}${delta ? ' · ' + delta : ''}</div>`;
+  return d;
 }
 // % of candidates who reached an offer stage that ended up hired.
 function offerAcceptRate(cands) {
