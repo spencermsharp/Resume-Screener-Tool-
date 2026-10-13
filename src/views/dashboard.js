@@ -2,8 +2,10 @@
 import { Profiles, Candidates, Settings, Stages } from '../data/db.js';
 import { el, esc } from '../utils.js';
 
-// Selected efficiency date range (session-scoped): '30'|'90'|'180'|'365'|'all'.
+// Selected efficiency date range (session-scoped): '30'|'90'|'180'|'365'|'all'|'custom'.
 let dashRange = '90';
+let dashCustomStart = '';   // 'YYYY-MM-DD'
+let dashCustomEnd = '';     // 'YYYY-MM-DD'
 
 export function renderDashboard(navigate) {
   const ws = Settings.workspace();
@@ -52,42 +54,68 @@ export function renderDashboard(navigate) {
   // ── Efficiency metrics with date range + prior-period comparison ──────────
   const effHeader = el('div', { style: 'display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin:26px 0 10px' });
   effHeader.appendChild(el('div', { class: 'section-label', style: 'font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--text2);font-weight:600;margin:0' }, 'Hiring efficiency'));
+  const controls = el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap' });
   const rangeSel = el('select', { style: 'max-width:200px' });
-  [['30', 'Last 30 days'], ['90', 'Last 90 days'], ['180', 'Last 6 months'], ['365', 'Last 12 months'], ['all', 'All time']]
+  [['30', 'Last 30 days'], ['90', 'Last 90 days'], ['180', 'Last 6 months'], ['365', 'Last 12 months'], ['all', 'All time'], ['custom', 'Custom range…']]
     .forEach(([v, l]) => { const o = el('option', { value: v }, l); if (v === dashRange) o.setAttribute('selected', 'selected'); rangeSel.appendChild(o); });
   rangeSel.addEventListener('change', () => { dashRange = rangeSel.value; navigate('dashboard'); });
-  effHeader.appendChild(rangeSel);
+  controls.appendChild(rangeSel);
+
+  if (dashRange === 'custom') {
+    const from = el('input', { type: 'date', value: dashCustomStart, style: 'max-width:150px' });
+    const to = el('input', { type: 'date', value: dashCustomEnd, style: 'max-width:150px' });
+    from.addEventListener('change', () => { dashCustomStart = from.value; navigate('dashboard'); });
+    to.addEventListener('change', () => { dashCustomEnd = to.value; navigate('dashboard'); });
+    controls.append(el('span', { class: 'muted', style: 'font-size:12px' }, 'from'), from, el('span', { class: 'muted', style: 'font-size:12px' }, 'to'), to);
+  }
+  effHeader.appendChild(controls);
   wrap.appendChild(effHeader);
 
   // Build current + prior windows for comparison.
   const now = Date.now();
   const dayMs = 86400000;
-  const span = dashRange === 'all' ? null : parseInt(dashRange, 10) * dayMs;
-  const curStart = span ? now - span : 0;
-  const priorStart = span ? now - 2 * span : 0;
-  const priorEnd = curStart;
+  let curStart, curEnd = null, priorStart = 0, priorEnd = 0, span = null, hasWindow = true;
 
-  // A candidate "counts" in a window if its hire (or screen) happened within it.
+  if (dashRange === 'all') {
+    hasWindow = false; curStart = 0;
+  } else if (dashRange === 'custom') {
+    // Need both dates to apply a custom window; otherwise behave like "all".
+    if (dashCustomStart && dashCustomEnd) {
+      curStart = new Date(dashCustomStart).getTime();
+      curEnd = new Date(dashCustomEnd).getTime() + dayMs - 1; // inclusive end day
+      span = curEnd - curStart;
+      priorEnd = curStart;
+      priorStart = curStart - span;
+    } else {
+      hasWindow = false; curStart = 0;
+    }
+  } else {
+    span = parseInt(dashRange, 10) * dayMs;
+    curStart = now - span; curEnd = null;
+    priorStart = now - 2 * span; priorEnd = curStart;
+  }
+  const comparing = hasWindow && span != null;
+
   const hiredAtIn = (c, start, end) => {
     const e = [...(c.stageHistory || [])].reverse().find(h => { const s = Stages.get(h.stage); return s && s.kind === 'hired'; });
     if (!e) return false; const t = new Date(e.at).getTime();
-    return t >= start && (end == null || t < end);
+    return t >= start && (end == null || t <= end);
   };
-  const screenedIn = (c, start, end) => { const t = new Date(c.createdAt).getTime(); return t >= start && (end == null || t < end); };
+  const screenedIn = (c, start, end) => { const t = new Date(c.createdAt).getTime(); return t >= start && (end == null || t <= end); };
 
-  const curHired = hired.filter(c => span ? hiredAtIn(c, curStart, null) : true);
-  const priorHired = span ? hired.filter(c => hiredAtIn(c, priorStart, priorEnd)) : [];
-  const curScreened = candidates.filter(c => span ? screenedIn(c, curStart, null) : true);
-  const priorScreened = span ? candidates.filter(c => screenedIn(c, priorStart, priorEnd)) : [];
+  const curHired = hired.filter(c => hasWindow ? hiredAtIn(c, curStart, curEnd) : true);
+  const priorHired = comparing ? hired.filter(c => hiredAtIn(c, priorStart, priorEnd)) : [];
+  const curScreened = candidates.filter(c => hasWindow ? screenedIn(c, curStart, curEnd) : true);
+  const priorScreened = comparing ? candidates.filter(c => screenedIn(c, priorStart, priorEnd)) : [];
   const curInterviewed = curScreened.filter(c => (c.stageHistory || []).some(h => { const s = Stages.get(h.stage); return s && s.kind === 'interview'; })).length;
 
   const m = {
     tth: avgDaysToHire(curHired),
     perHire: curHired.length ? Math.round(curInterviewed / curHired.length * 10) / 10 : null,
-    fill: avgDaysToFill(profiles, curStart),
+    fill: avgDaysToFill(profiles, hasWindow ? curStart : null, curEnd),
     accept: offerAcceptRate(curScreened),
   };
-  const pm = span ? {
+  const pm = comparing ? {
     tth: avgDaysToHire(priorHired),
     perHire: priorHired.length ? Math.round(priorScreened.filter(c => (c.stageHistory || []).some(h => { const s = Stages.get(h.stage); return s && s.kind === 'interview'; })).length / priorHired.length * 10) / 10 : null,
     fill: avgDaysToFill(profiles, priorStart, priorEnd),
