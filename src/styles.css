@@ -357,7 +357,7 @@ h3 { font-size: 14px; font-weight: 600; }
 /* ── SYNC STATUS CHIP ────────────────────────────────────────────────────── */
 .sync-chip { border:1px solid var(--border); border-radius:20px; padding:5px 12px; font-size:12px; font-weight:600; cursor:pointer; background:var(--surface2); color:var(--text2); transition:all .15s; }
 .sync-chip:hover { border-color:var(--accent); }
-.sync-chip.sc-ok { color:var(--green); border-color:rgba(34,197,94,.4); }
+.sync-chip.sc-ok { color:#3b82f6; border-color:rgba(59,130,246,.45); }
 .sync-chip.sc-busy { color:var(--accent); border-color:rgba(224,107,26,.4); }
 .sync-chip.sc-pending { color:var(--yellow); border-color:rgba(234,179,8,.4); }
 .sync-chip.sc-off { color:var(--text2); }
