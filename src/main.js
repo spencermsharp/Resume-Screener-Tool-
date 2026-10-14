@@ -1,5 +1,5 @@
 // ── APP SHELL — Kruew + Vimenture/Qualis Hiring Platform ─────────────────────
-import { initDB, initCloudSync, syncNow, onSyncStatus, getSyncStatus, Settings, WORKSPACES } from './data/db.js';
+import { initDB, initCloudSync, syncNow, forceResync, onSyncStatus, getSyncStatus, Settings, WORKSPACES } from './data/db.js';
 import { el } from './utils.js';
 import { renderDashboard } from './views/dashboard.js';
 import { renderProfiles } from './views/profiles.js';
@@ -147,9 +147,11 @@ function render(arg) {
     switcher.appendChild(b);
   });
   right.appendChild(switcher);
-  // Sync status chip (click to sync now).
+  // Sync status chip. Click = sync now. Double-click = force full re-sync from
+  // Supabase (wipes local cache + re-pulls) — fixes an out-of-sync device.
   if (isConfigured()) {
-    const chip = el('button', { class: 'sync-chip', id: 'sync-chip', title: 'Click to sync now', onclick: () => syncNow() });
+    const chip = el('button', { class: 'sync-chip', id: 'sync-chip', title: 'Click: sync now · Double-click: force full re-sync', onclick: () => syncNow() });
+    chip.addEventListener('dblclick', async () => { await forceResync(); render(); });
     paintSyncChip(chip, getSyncStatus());
     right.appendChild(chip);
   }
@@ -198,6 +200,10 @@ function render(arg) {
 
   app.appendChild(main);
 }
+
+// Expose a console escape hatch to force a full re-sync on any device:
+//   run  forceResync()  in the browser console.
+if (typeof window !== 'undefined') window.forceResync = async () => { const n = await forceResync(); render(); return n; };
 
 // Bootstrap: initialize auth (loads runtime config + session) before first paint.
 (async function boot() {

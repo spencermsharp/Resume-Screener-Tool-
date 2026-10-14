@@ -613,6 +613,27 @@ function setSyncStatus(patch) { Object.assign(_syncState, patch); _syncListeners
 let _syncing = false;
 let _onPulledCb = null;
 
+// Hard reset: wipe the local cache for all synced tables and re-pull from
+// Supabase (source of truth). Also clears any stale write-queue. Use this when a
+// device is out of sync. Returns the fresh candidate count.
+export async function forceResync() {
+  const { isConfigured } = await import('../auth/supabaseClient.js');
+  if (!isConfigured()) return null;
+  // Clear local caches + the write queue so nothing can "protect" stale rows.
+  try {
+    for (const lsKey of Object.keys(SYNC)) localStorage.removeItem(lsKey);
+    localStorage.removeItem('rst_write_queue');
+    localStorage.removeItem('rst_write_deadletter');
+  } catch {}
+  setSyncStatus({ status: 'syncing' });
+  const ok = await backend.pullAll();
+  setSyncStatus({ status: ok ? 'synced' : 'error', pending: 0, lastSync: new Date().toISOString() });
+  if (_onPulledCb) _onPulledCb();
+  const n = (backend.read(KEYS.candidates) || []).length;
+  console.log('[sync] forceResync complete — candidates now:', n);
+  return n;
+}
+
 // Run one full sync cycle: push the queue, then pull from Supabase (source of
 // truth). Updates the status signal throughout. Safe to call manually.
 export async function syncNow() {
