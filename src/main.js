@@ -101,9 +101,16 @@ function paintSyncChip(chip, st) {
 function render(arg) {
   app.innerHTML = '';
 
-  // Login wall (cloud mode only). Local dev skips this.
+  // Login wall (cloud mode only). Local dev skips this. On successful login,
+  // pull server data BEFORE showing the app so the first screen is server-truth.
   if (needsLogin()) {
-    app.appendChild(renderLogin(() => { current = 'dashboard'; render(); }));
+    app.appendChild(renderLogin(async () => {
+      current = 'dashboard';
+      app.innerHTML = '<div class="main-content"><div class="card"><p class="muted">Loading latest data…</p></div></div>';
+      try { await forceResync(); } catch (e) { console.warn('Post-login sync failed:', e); }
+      render();
+      initCloudSync(() => {}).catch(() => {});
+    }));
     return;
   }
 
@@ -205,34 +212,27 @@ function render(arg) {
 //   run  forceResync()  in the browser console.
 if (typeof window !== 'undefined') window.forceResync = async () => { const n = await forceResync(); render(); return n; };
 
-// Bootstrap: initialize auth (loads runtime config + session) before first paint.
+// Bootstrap. CRITICAL: we PULL FROM SUPABASE BEFORE the first render, so every
+// device always starts from the server's truth — never from stale local cache.
 (async function boot() {
-  app.innerHTML = '<div class="main-content"><div class="card"><p class="muted">Loading…</p></div></div>';
+  app.innerHTML = '<div class="main-content"><div class="card"><p class="muted">Loading latest data…</p></div></div>';
   try { await initAuth(); } catch (e) { console.error('Auth init failed:', e); }
-  render();
-  // Keep the sync chip live WITHOUT ever re-rendering the page (so you're never
-  // interrupted). The chip updates in place as status changes.
+
+  // Keep the sync chip live without ever re-rendering the page body.
   onSyncStatus(st => {
     const chip = document.getElementById('sync-chip');
     if (chip) paintSyncChip(chip, st);
   });
 
-  // Cloud sync. The periodic pull refreshes the local cache but does NOT force a
-  // re-render — fresh data appears the next time you navigate. The only auto
-  // re-render is a one-time refresh right after the FIRST pull on boot, so the
-  // initial screen reflects the server. After that, we never disrupt your work.
-  let firstPull = true;
-  initCloudSync(() => {
-    if (firstPull) {
-      firstPull = false;
-      // Safe to repaint on first load only if you're on a plain list view with
-      // nothing open/being edited.
-      const listViews = ['dashboard', 'profiles', 'results', 'futurefit', 'companies', 'placements', 'blacklist', 'team'];
-      if (listViews.includes(current) && !currentArg &&
-          !document.querySelector('.main-content input, .main-content textarea, .main-content select')) {
-        render(currentArg);
-      }
-    }
-    // Subsequent pulls: do nothing to the DOM. Data is cached; it shows on next nav.
-  }).catch(e => console.warn('Cloud sync init failed:', e));
+  // Pull server data FIRST (if logged in / cloud configured), THEN render — so
+  // the very first screen reflects Supabase, identical for everyone.
+  try {
+    if (!needsLogin()) await forceResync();   // wipe cache + mirror server before paint
+  } catch (e) { console.warn('Initial sync failed, rendering from cache:', e); }
+  render();
+
+  // Then keep syncing in the background. Periodic pulls refresh the cache but do
+  // NOT re-render (so you're never interrupted) — fresh data shows on next nav.
+  initCloudSync(() => { /* background refresh only; no auto re-render */ })
+    .catch(e => console.warn('Cloud sync init failed:', e));
 })();

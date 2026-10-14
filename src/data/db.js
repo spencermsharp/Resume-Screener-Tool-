@@ -142,41 +142,31 @@ const backend = {
       }
       const rows = await r.sbSelect(cfg.table);
       if (rows === r.TABLE_MISSING) continue;            // table not created yet — skip quietly
-      if (rows == null) { ok = false; continue; }        // fetch FAILED — keep local, mark not-ok
+      if (rows == null) { ok = false; continue; }        // fetch FAILED — keep cache, mark not-ok
 
-      // SOURCE OF TRUTH = SUPABASE. The local cache becomes an exact mirror of
-      // the server, EXCEPT records with un-synced pending writes (protected
-      // until they upload). This guarantees server-side deletes/edits always win.
+      // SUPABASE IS THE ONLY SOURCE OF TRUTH. The cache is an exact mirror of the
+      // server — no merge, no "local wins". The ONLY exception: a record with an
+      // in-flight pending write (not yet uploaded) is preserved so you don't lose
+      // the change you just made before it syncs. Everything else = server.
       const p = pend[cfg.table] || { upsert: new Set(), del: new Set() };
-      const serverById = {};
-      rows.forEach(x => { if (x && x.data) serverById[String(x.id)] = x.data; });
+      const serverItems = rows.map(x => x.data).filter(Boolean);
+      const serverIds = new Set(serverItems.map(x => String(x.id)));
 
-      // Edge case: server empty + no pending + we have local data = first-run
-      // migration (push local up). Otherwise an empty server legitimately means
-      // "no records" and we mirror that.
+      // First-run migration: server empty + we have un-synced local rows → push up.
       const localList = this.read(lsKey) || [];
-      if (rows.length === 0 && localList.length && p.upsert.size === 0) {
+      if (rows.length === 0 && localList.length && p.upsert.size === 0 && this._migrated !== lsKey) {
+        // Only migrate once per key to avoid loops; mark it.
         const { enqueueUpsert } = await wq();
         enqueueUpsert(cfg.table, localList.map(x => ({ id: String(x.id), data: x, updated_at: new Date().toISOString() })), cfg.table);
-        continue;
       }
 
-      const localById = {}; localList.forEach(x => { localById[String(x.id)] = x; });
-      const merged = [];
-      // 1) Everything the server has (authoritative).
-      for (const id of Object.keys(serverById)) {
-        if (p.del.has(id)) continue;                     // we deleted it locally, not yet synced
-        if (p.upsert.has(id) && localById[id]) merged.push(localById[id]); // our pending edit wins until it uploads
-        else merged.push(serverById[id]);
+      // Mirror = server rows, plus any pending-upsert local rows not yet on server.
+      const mirror = serverItems.slice();
+      if (p.upsert.size) {
+        const localById = {}; localList.forEach(x => { localById[String(x.id)] = x; });
+        p.upsert.forEach(id => { if (localById[id] && !serverIds.has(id)) mirror.push(localById[id]); });
       }
-      // 2) Local records NOT on the server — keep ONLY if pending upload (brand
-      //    new, still syncing). Anything else local-only = deleted elsewhere → drop.
-      localList.forEach(loc => {
-        const id = String(loc.id);
-        if (serverById[id]) return;
-        if (p.upsert.has(id)) merged.push(loc);
-      });
-      localStorage.setItem(lsKey, JSON.stringify(merged));
+      localStorage.setItem(lsKey, JSON.stringify(mirror));
     }
     return ok;
   },
@@ -619,15 +609,16 @@ let _onPulledCb = null;
 export async function forceResync() {
   const { isConfigured } = await import('../auth/supabaseClient.js');
   if (!isConfigured()) return null;
-  // Clear local caches + the write queue so nothing can "protect" stale rows.
-  try {
-    for (const lsKey of Object.keys(SYNC)) localStorage.removeItem(lsKey);
-    localStorage.removeItem('rst_write_queue');
-    localStorage.removeItem('rst_write_deadletter');
-  } catch {}
+  const { drainQueue, hasPendingWrites } = await import('./writeQueue.js');
   setSyncStatus({ status: 'syncing' });
+  // Push any pending local writes first so we don't lose them, THEN wipe the
+  // cache and mirror the server. (We do NOT delete the queue — pending writes
+  // are preserved and reconciled by pullAll.)
+  try { await drainQueue(); } catch {}
+  try { for (const lsKey of Object.keys(SYNC)) localStorage.removeItem(lsKey); } catch {}
   const ok = await backend.pullAll();
-  setSyncStatus({ status: ok ? 'synced' : 'error', pending: 0, lastSync: new Date().toISOString() });
+  const pending = hasPendingWrites();
+  setSyncStatus({ status: !ok ? 'error' : (pending ? 'pending' : 'synced'), lastSync: new Date().toISOString() });
   if (_onPulledCb) _onPulledCb();
   const n = (backend.read(KEYS.candidates) || []).length;
   console.log('[sync] forceResync complete — candidates now:', n);
