@@ -407,6 +407,16 @@ h3 { font-size: 14px; font-weight: 600; }
 }
 .rank-table tr.rank-divider:hover td { background: var(--surface2); }
 
+/* Sub-group labels inside the out section (Future Fit / Rejected / Out). */
+.rank-table tr.rank-subdivider td {
+  background: var(--surface); padding: 5px 12px 5px 24px; border-top: 1px solid var(--border);
+}
+.rank-table tr.rank-subdivider span {
+  font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--text2);
+}
+.rank-table tr.rank-subdivider:hover td { background: var(--surface); }
+
 /* Rejected / out candidates sit at the bottom, visually de-emphasized. */
 .rank-table tr.is-out td { opacity: .62; }
 .rank-table tr.is-out:hover td { opacity: 1; }

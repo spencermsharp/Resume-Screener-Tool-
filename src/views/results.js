@@ -135,9 +135,13 @@ export function renderResults(navigate, profileId) {
     return wrap;
   }
 
-  // "Out of the running" = rejected or auto-out. Everyone else is active and
-  // sorts to the top; the out group drops below a divider at the bottom.
-  const isOut = c => { const s = Stages.get(c.stage); return s && s.kind === 'reject'; };
+  // "Out of the running" = anyone who won't be getting THIS job: Future Fit
+  // (parked), Rejected, and Out/Blackballed. Everyone else is active and sorts
+  // to the top; the out group drops below a divider, ordered Future Fit →
+  // Rejected → Out.
+  const isOut = c => { const s = Stages.get(c.stage); return s && (s.kind === 'reject' || s.kind === 'parked'); };
+  // Rank within the out group: Future Fit first, then Rejected, then Out.
+  const outRank = c => (c.stage === 'future_fit' ? 0 : c.stage === 'rejected' ? 1 : c.stage === 'out' ? 2 : 1.5);
   const q = resultsSearch.trim().toLowerCase();
   const matchesSearch = c => !q || String(c.name || '').toLowerCase().includes(q);
 
@@ -151,7 +155,8 @@ export function renderResults(navigate, profileId) {
 
   const byScore = (a, b) => (b.result.score || 0) - (a.result.score || 0);
   const activeShown = base.filter(c => !isOut(c)).sort(byScore);
-  const outShown = base.filter(isOut).sort(byScore);
+  // Out group: Future Fit → Rejected → Out, best-first within each.
+  const outShown = base.filter(isOut).sort((a, b) => (outRank(a) - outRank(b)) || byScore(a, b));
 
   // Stage filter + search live on ONE row to save vertical space.
   wrap.appendChild(renderFilterBar(stages, all, navigate, activeId, true));
@@ -389,12 +394,30 @@ function renderRankedList(activeCands, outCands, profile, navigate) {
   let rank = 1;
   activeCands.forEach(c => addRow(c, rank++, false));
 
-  // Divider separating the people still in the running from the rejected/out.
+  // "Out of the running" section — people who won't get THIS job. Grouped and
+  // ordered Future Fit → Rejected → Out, each with its own sub-label.
   if (outCands.length) {
     const divTr = el('tr', { class: 'rank-divider' });
     divTr.innerHTML = `<td colspan="7"><span>Out of the running (${outCands.length})</span></td>`;
     tb.appendChild(divTr);
-    outCands.forEach(c => addRow(c, rank++, true));
+
+    const groupLabel = c => c.stage === 'future_fit' ? 'Future Fit'
+      : c.stage === 'rejected' ? 'Rejected'
+      : c.stage === 'out' ? 'Out (Blackballed)'
+      : Stages.label(c.stage);
+
+    let lastGroup = null;
+    outCands.forEach(c => {
+      const g = groupLabel(c);
+      if (g !== lastGroup) {
+        const n = outCands.filter(x => groupLabel(x) === g).length;
+        const subTr = el('tr', { class: 'rank-subdivider' });
+        subTr.innerHTML = `<td colspan="7"><span>${esc(g)} (${n})</span></td>`;
+        tb.appendChild(subTr);
+        lastGroup = g;
+      }
+      addRow(c, rank++, true);
+    });
   }
 
   table.appendChild(tb);

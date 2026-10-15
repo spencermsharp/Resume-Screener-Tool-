@@ -16,6 +16,7 @@
  */
 
 import { uid, today } from '../utils.js';
+import { lightStructure, nameFromFileName } from './parser.js';
 
 const KEYS = {
   profiles: 'qrs_profiles',
@@ -240,6 +241,56 @@ const DEFAULT_STAGES = [
   { id: 'rejected',   label: 'Rejected',                 kind: 'reject',    terminal: true  },
 ];
 
+// Does this candidate name look like it's just the uploaded file's name
+// (rather than a person's name)? Used by the one-time name backfill.
+function nameLooksLikeFile(name, fileName) {
+  const n = String(name || '').trim();
+  if (!n) return true;
+  if (/\.(pdf|txt|docx?|rtf)$/i.test(n)) return true;        // ends in a file extension
+  if (fileName && n === String(fileName).trim()) return true; // equals the stored filename
+  if (/[_/\\]/.test(n)) return true;                          // path/underscore separators
+  if (/\d{3,}/.test(n)) return true;                          // long digit runs (e.g. "resume2026v2")
+  return false;
+}
+
+const NAME_BACKFILL_FLAG = 'qrs_namebackfill_v1';
+
+// ONE-TIME BACKFILL: older candidates were named after their uploaded file
+// (e.g. "jane_doe_resume.pdf"). Re-derive the real name from the resume text,
+// falling back to a cleaned-up filename, for any name that still looks like a
+// file. Idempotent and guarded by a localStorage flag so it runs exactly once
+// per device — but only AFTER real candidate data is present (important in
+// cloud mode, where the server pull happens after initDB). Good names are
+// never touched. Returns true once it has actually run against real data.
+function maybeBackfillNames() {
+  if (localStorage.getItem(NAME_BACKFILL_FLAG) != null) return false;
+  const list = backend.read(KEYS.candidates) || [];
+  if (!list.length) return false;   // no data yet — try again after the pull
+
+  let changed = false;
+  const people = backend.read(KEYS.people) || [];
+  const peopleById = {}; people.forEach(p => { peopleById[String(p.id)] = p; });
+  let peopleChanged = false;
+
+  for (const c of list) {
+    if (!nameLooksLikeFile(c.name, c.fileName)) continue;
+    const fromText = (lightStructure(c.rawText || '').name || '').trim();
+    const better = fromText || nameFromFileName(c.fileName || c.name) || '';
+    if (!better || better === c.name) continue;
+    c.name = better;
+    changed = true;
+    // Keep the linked global Person's name in sync when it was also a filename.
+    const person = c.personId ? peopleById[String(c.personId)] : null;
+    if (person && nameLooksLikeFile(person.name, c.fileName)) { person.name = better; peopleChanged = true; }
+  }
+
+  if (changed) backend.write(KEYS.candidates, list);
+  if (peopleChanged) backend.write(KEYS.people, people);
+  localStorage.setItem(NAME_BACKFILL_FLAG, String(Date.now()));
+  console.log('[backfill] candidate names normalized:', changed ? 'updated' : 'nothing to change');
+  return true;
+}
+
 // ── INIT ───────────────────────────────────────────────────────────────────
 export function initDB() {
   if (backend.read(KEYS.profiles) == null) backend.write(KEYS.profiles, SEED_PROFILES);
@@ -261,6 +312,12 @@ export function initDB() {
     if (c.stage === 'no_interview') { c.stage = 'rejected'; migrated = true; }
   }
   if (migrated) backend.write(KEYS.candidates, cands);
+
+  // One-time name backfill (filename → real name). In cloud mode the real data
+  // arrives after the first server pull, so this is also invoked from
+  // forceResync()/pull — the flag guard makes it run exactly once, whenever the
+  // candidate data is actually present.
+  maybeBackfillNames();
 
   // Drop the retired stage from any saved stages list.
   const savedStages = backend.read(KEYS.stages);
@@ -617,6 +674,9 @@ export async function forceResync() {
   try { await drainQueue(); } catch {}
   try { for (const lsKey of Object.keys(SYNC)) localStorage.removeItem(lsKey); } catch {}
   const ok = await backend.pullAll();
+  // Real server data is now in the cache — run the one-time name backfill (it
+  // self-guards, so this is a no-op once it has run against real data).
+  if (ok) { try { maybeBackfillNames(); } catch (e) { console.warn('[backfill] failed', e); } }
   const pending = hasPendingWrites();
   setSyncStatus({ status: !ok ? 'error' : (pending ? 'pending' : 'synced'), lastSync: new Date().toISOString() });
   if (_onPulledCb) _onPulledCb();
@@ -641,6 +701,8 @@ export async function syncNow() {
     setSyncStatus({ status: 'syncing' });
     await drainQueue();                       // push local changes up first
     const ok = await backend.pullAll();       // then mirror server down
+    // One-time name backfill, once real data is present (self-guarded no-op).
+    if (ok) { try { maybeBackfillNames(); } catch (e) { console.warn('[backfill] failed', e); } }
     const pending = queueStatus().pending;
     if (!ok) setSyncStatus({ status: 'error', pending });
     else if (pending > 0 || hasPendingWrites()) setSyncStatus({ status: 'pending', pending });
