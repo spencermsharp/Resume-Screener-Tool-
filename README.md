@@ -15,7 +15,7 @@ handoff (see `HANDOFF.md`).
 ## Running Locally
 
 ```bash
-cd ~/Desktop/vimenture-resume-screener
+cd ~/Desktop/kruew-vimenture-qualis-resume-screener
 pip install -r requirements.txt      # first time only (Flask + python-dotenv)
 cp .env.example .env                 # first time only, then add your key
 python3 serve.py
@@ -99,7 +99,7 @@ shape**, so nothing else in the app changes.
 ## Architecture
 
 ```
-vimenture-resume-screener/
+kruew-vimenture-qualis-resume-screener/
 ├── serve.py              # Python dev server (port 3200)
 ├── package.json
 ├── index.html
