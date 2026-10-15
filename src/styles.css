@@ -332,7 +332,7 @@ h3 { font-size: 14px; font-weight: 600; }
 .pf-row { border-bottom: 1px solid var(--border); }
 .pf-row:last-child { border-bottom: none; }
 .pf-head { display: flex; align-items: center; gap: 14px; padding: 12px 4px; cursor: pointer; }
-.pf-head:hover { background: rgba(255,255,255,.02); }
+.pf-head:hover { background: var(--surface2); }
 .pf-label { width: 200px; font-weight: 600; font-size: 13px; flex: 0 0 auto; }
 .pf-track { flex: 1; height: 20px; background: var(--surface2); border-radius: 6px; overflow: hidden; }
 .pf-fill { height: 100%; border-radius: 6px; min-width: 2px; transition: width .25s ease; }
@@ -362,3 +362,57 @@ h3 { font-size: 14px; font-weight: 600; }
 .sync-chip.sc-pending { color:var(--yellow); border-color:rgba(234,179,8,.4); }
 .sync-chip.sc-off { color:var(--text2); }
 .sync-chip.sc-err { color:var(--red); border-color:rgba(239,68,68,.5); }
+
+/* ── RESULTS: SEARCH, FILTER BAR, SCROLLABLE LIST ────────────────────────── */
+/* All colors use theme tokens so this reads correctly in light AND dark. */
+
+/* Candidate name search box + its live stage-lookup chips. */
+.search-row { display: flex; gap: 8px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+.search-row input[type="search"] { flex: 1; max-width: 360px; }
+.search-hits { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; }
+.search-hit {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 10px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface2); color: var(--text); cursor: pointer; font-size: 13px;
+  transition: border-color .15s, background .15s;
+}
+.search-hit:hover { border-color: var(--accent); background: var(--surface); }
+.search-hit strong { font-weight: 600; }
+
+/* Filter bar: stage dropdown. */
+.results-filterbar {
+  display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap;
+  margin: 0 0 14px;
+}
+.filter-field { display: flex; flex-direction: column; gap: 4px; }
+.filter-field label { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--text2); font-weight: 600; }
+.filter-field select { min-width: 180px; }
+
+/* Scrollable ranked list — long lists stay contained with a sticky header. */
+.rank-scroll { max-height: 60vh; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+.rank-scroll table { margin: 0; }
+.rank-scroll thead th { position: sticky; top: 0; z-index: 1; background: var(--surface2); }
+
+/* Divider between the people still in the running and those out. */
+.rank-table tr.rank-divider td {
+  position: sticky; top: 37px; z-index: 1;
+  background: var(--surface2); border-top: 2px solid var(--border);
+  padding: 6px 12px;
+}
+.rank-table tr.rank-divider span {
+  font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--text2);
+}
+.rank-table tr.rank-divider:hover td { background: var(--surface2); }
+
+/* Rejected / out candidates sit at the bottom, visually de-emphasized. */
+.rank-table tr.is-out td { opacity: .62; }
+.rank-table tr.is-out:hover td { opacity: 1; }
+
+/* Scrollable people list inside an expanded pipeline stage. */
+.pf-people { max-height: 320px; overflow-y: auto; }
+
+/* Subtle, theme-aware scrollbars for the scroll regions. */
+.rank-scroll::-webkit-scrollbar, .pf-people::-webkit-scrollbar { width: 10px; }
+.rank-scroll::-webkit-scrollbar-thumb, .pf-people::-webkit-scrollbar-thumb { background: var(--border); border-radius: 6px; }
+.rank-scroll, .pf-people { scrollbar-color: var(--border) transparent; }

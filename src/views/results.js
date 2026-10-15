@@ -7,8 +7,9 @@ import { renderPipeline } from './pipeline.js';
 
 // Remember the last-used sub-view (ranked list vs pipeline board) per session.
 let resultsView = 'ranked';
-// Active filter: 'active' = still in the running; 'all' = everyone screened.
-let resultsFilter = 'active';
+// Stage filter for the ranked list: '' = all stages, or a specific stage id to
+// see everyone currently in that stage.
+let resultsStage = '';
 // Compare selection (candidate ids) — session-scoped.
 let compareSel = new Set();
 // Company filter for the position picker ('' = all).
@@ -109,16 +110,13 @@ export function renderResults(navigate, profileId) {
   toggle.appendChild(el('button', { class: `tab-btn${resultsView === 'ranked' ? ' active' : ''}`, onclick: () => { resultsView = 'ranked'; navigate('results', activeId); } }, 'Ranked list'));
   toggle.appendChild(el('button', { class: `tab-btn${resultsView === 'pipeline' ? ' active' : ''}`, onclick: () => { resultsView = 'pipeline'; navigate('results', activeId); } }, 'Pipeline'));
   bar.appendChild(toggle);
-
-  // Candidate name search — works for both the Ranked list and Pipeline sub-views.
-  // Shows the candidate's current hiring stage for quick lookup.
-  bar.appendChild(renderSearchBox(navigate, activeId));
-
   wrap.appendChild(bar);
 
   const profile = Profiles.get(activeId);
 
   if (resultsView === 'pipeline') {
+    // Pipeline keeps its search up top (it drives which stages expand).
+    wrap.appendChild(renderSearchBox(navigate, activeId));
     wrap.appendChild(renderPipeline(navigate, profile, resultsSearch));
     return wrap;
   }
@@ -135,35 +133,66 @@ export function renderResults(navigate, profileId) {
     return wrap;
   }
 
-  // Active = still in the running (not rejected, out, future-fit, or hired).
-  const isActive = c => { const s = Stages.get(c.stage); return s && s.kind !== 'reject' && s.kind !== 'hired' && s.kind !== 'parked'; };
-  const activeCands = all.filter(isActive);
+  // "Out of the running" = rejected or auto-out. Everyone else is active and
+  // sorts to the top; the out group drops below a divider at the bottom.
+  const isOut = c => { const s = Stages.get(c.stage); return s && s.kind === 'reject'; };
   const q = resultsSearch.trim().toLowerCase();
   const matchesSearch = c => !q || String(c.name || '').toLowerCase().includes(q);
-  const shown = (resultsFilter === 'active' ? activeCands : all)
-    .filter(matchesSearch)
-    .sort((a, b) => (b.result.score || 0) - (a.result.score || 0));
 
-  // Active / All filter toggle.
-  const filterRow = el('div', { class: 'tabs', style: 'margin:0 0 14px' });
-  filterRow.appendChild(el('button', { class: `tab-btn${resultsFilter === 'active' ? ' active' : ''}`, onclick: () => { resultsFilter = 'active'; navigate('results', activeId); } }, `In the running (${activeCands.length})`));
-  filterRow.appendChild(el('button', { class: `tab-btn${resultsFilter === 'all' ? ' active' : ''}`, onclick: () => { resultsFilter = 'all'; navigate('results', activeId); } }, `All screened (${all.length})`));
-  wrap.appendChild(filterRow);
+  // Validate the saved stage filter against stages that actually have people.
+  const stages = Stages.all();
+  if (resultsStage && !all.some(c => c.stage === resultsStage)) resultsStage = '';
 
-  wrap.appendChild(renderRankedList(shown, profile, navigate));
+  // Base set: a specific stage shows just that stage; otherwise everyone.
+  const base = (resultsStage ? all.filter(c => c.stage === resultsStage) : all)
+    .filter(matchesSearch);
+
+  const byScore = (a, b) => (b.result.score || 0) - (a.result.score || 0);
+  const activeShown = base.filter(c => !isOut(c)).sort(byScore);
+  const outShown = base.filter(isOut).sort(byScore);
+
+  wrap.appendChild(renderFilterBar(stages, all, navigate, activeId));
+
+  // Search sits directly above the list.
+  wrap.appendChild(renderSearchBox(navigate, activeId));
+
+  wrap.appendChild(renderRankedList(activeShown, outShown, profile, navigate));
   return wrap;
+}
+
+// Filter bar for the ranked list: just a stage dropdown so you can see
+// everyone currently in a given hiring stage. (Active vs rejected is now shown
+// inline via a divider in the list itself — no separate toggle needed.)
+function renderFilterBar(stages, all, navigate, activeId) {
+  const bar = el('div', { class: 'results-filterbar' });
+
+  // Stage filter dropdown — "see everyone in that stage".
+  const stageWrap = el('div', { class: 'filter-field' });
+  stageWrap.appendChild(el('label', {}, 'Stage'));
+  const sel = el('select');
+  sel.appendChild(el('option', { value: '' }, `All stages (${all.length})`));
+  stages.forEach(s => {
+    const n = all.filter(c => c.stage === s.id).length;
+    const o = el('option', { value: s.id }, `${s.label} (${n})`);
+    if (s.id === resultsStage) o.setAttribute('selected', 'selected');
+    sel.appendChild(o);
+  });
+  sel.addEventListener('change', () => { resultsStage = sel.value; navigate('results', activeId); });
+  stageWrap.appendChild(sel);
+  bar.appendChild(stageWrap);
+
+  return bar;
 }
 
 // Candidate name search box. Filters the ranked list / pipeline below, and
 // surfaces the matching candidates' current hiring stage for a quick lookup.
 function renderSearchBox(navigate, activeId) {
-  const row = el('div', { style: 'display:flex;gap:8px;align-items:center;margin-top:12px' });
+  const row = el('div', { class: 'search-row' });
 
   const input = el('input', {
     type: 'search',
     placeholder: 'Search candidate by name…',
     value: resultsSearch,
-    style: 'flex:1;max-width:360px',
     'aria-label': 'Search candidate by name',
   });
   // The app re-renders the whole view on navigate(), which recreates this
@@ -204,14 +233,13 @@ function renderSearchBox(navigate, activeId) {
       .filter(c => c.result && String(c.name || '').toLowerCase().includes(q))
       .sort((a, b) => (b.result.score || 0) - (a.result.score || 0));
 
-    const hits = el('div', { class: 'search-hits', style: 'margin-top:10px;display:flex;flex-wrap:wrap;gap:8px' });
+    const hits = el('div', { class: 'search-hits' });
     if (!matches.length) {
       hits.appendChild(el('div', { class: 'muted', style: 'font-size:12px' }, `No candidates match “${esc(resultsSearch.trim())}”.`));
     } else {
       matches.forEach(c => {
         const chip = el('button', {
           class: 'search-hit',
-          style: 'display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--border,#e5e7eb);border-radius:999px;background:var(--bg,#fff);cursor:pointer;font-size:13px',
           onclick: () => navigate('candidate', c.id),
           title: 'Open candidate',
         });
@@ -226,19 +254,25 @@ function renderSearchBox(navigate, activeId) {
 }
 
 // Clean, scannable ranked list — one row per candidate, click to drill in.
-function renderRankedList(cands, profile, navigate) {
+// Everyone shows in a single list: active (still in the running) at the top,
+// then a divider, then anyone rejected/out at the bottom.
+function renderRankedList(activeCands, outCands, profile, navigate) {
   const threshold = profile.threshold != null ? profile.threshold : 60;
   const card = el('div', { class: 'card' });
+  const allCands = [...activeCands, ...outCands];
+  const total = allCands.length;
 
   const subRow = el('div', { class: 'row-between', style: 'margin-bottom:12px;align-items:center' });
+  const bits = [`${total} candidate${total === 1 ? '' : 's'}`];
+  if (outCands.length) bits.push(`${activeCands.length} in the running · ${outCands.length} out`);
   subRow.appendChild(el('div', { class: 'muted', style: 'font-size:12px' },
-    `${cands.length} shown · ranked best-first · threshold ${threshold}%. First-level screen — a human makes the final call.`));
-  const exportBtn = el('button', { class: 'btn btn-sm', onclick: () => exportShortlist(cands, profile) }, '⬇ Export / share shortlist');
+    `${bits.join(' · ')} · ranked best-first · threshold ${threshold}%. First-level screen — a human makes the final call.`));
+  const exportBtn = el('button', { class: 'btn btn-sm', onclick: () => exportShortlist(allCands, profile) }, '⬇ Export / share shortlist');
   subRow.appendChild(exportBtn);
   card.appendChild(subRow);
 
   // Compare bar — appears when candidates are selected.
-  const selValid = [...compareSel].filter(id => cands.some(c => c.id === id));
+  const selValid = [...compareSel].filter(id => allCands.some(c => c.id === id));
   compareSel = new Set(selValid);
   if (compareSel.size) {
     const ids = [...compareSel];
@@ -264,6 +298,15 @@ function renderRankedList(cands, profile, navigate) {
     card.appendChild(bar);
   }
 
+  // Empty state (e.g. a stage with nobody, or a search with no match).
+  if (!total) {
+    card.appendChild(el('div', { class: 'empty', style: 'padding:28px 16px' },
+      html('<div class="big">🔍</div>'),
+      el('p', { class: 'muted' }, 'No candidates match the current filters.')));
+    return card;
+  }
+
+  const scroller = el('div', { class: 'rank-scroll' });
   const table = el('table', { class: 'rank-table' });
   table.innerHTML = `<thead><tr>
     <th style="width:34px"></th>
@@ -276,14 +319,15 @@ function renderRankedList(cands, profile, navigate) {
   </tr></thead>`;
   const tb = el('tbody');
 
-  cands.forEach((c, i) => {
+  // Build a candidate row. `n` is the running rank number across both groups.
+  const addRow = (c, n, dimmed) => {
     const r = c.result;
     const below = (r.score || 0) < threshold;
     const matchedN = (r.matched || []).length;
     const totalN = matchedN + (r.missing || []).length;
     const missReq = (r.missing || []).filter(m => m.required).length;
 
-    const tr = el('tr');
+    const tr = el('tr', dimmed ? { class: 'is-out' } : {});
     const fitBits = [`${matchedN}/${totalN} criteria`];
     if (missReq) fitBits.push(`${missReq} required missing`);
 
@@ -300,9 +344,8 @@ function renderRankedList(cands, profile, navigate) {
     cbTd.appendChild(cb);
     tr.appendChild(cbTd);
 
-    const rest = el('td', { style: 'display:none' }); // placeholder to keep innerHTML approach simple
     tr.insertAdjacentHTML('beforeend', `
-      <td class="rank-num">#${i + 1}</td>
+      <td class="rank-num">#${n}</td>
       <td>
         <div class="score-row">
           <span class="score-chip ${scoreClass(r.score)}">${r.score}</span>
@@ -319,13 +362,24 @@ function renderRankedList(cands, profile, navigate) {
     const td = el('td');
     td.appendChild(el('button', { class: 'btn btn-sm', onclick: (e) => { e.stopPropagation(); navigate('candidate', c.id); } }, 'Open'));
     tr.appendChild(td);
-    // Clicking the name/row opens the candidate.
     tr.querySelector('.c-name').addEventListener('click', () => navigate('candidate', c.id));
     tb.appendChild(tr);
-  });
+  };
+
+  let rank = 1;
+  activeCands.forEach(c => addRow(c, rank++, false));
+
+  // Divider separating the people still in the running from the rejected/out.
+  if (outCands.length) {
+    const divTr = el('tr', { class: 'rank-divider' });
+    divTr.innerHTML = `<td colspan="7"><span>Out of the running (${outCands.length})</span></td>`;
+    tb.appendChild(divTr);
+    outCands.forEach(c => addRow(c, rank++, true));
+  }
 
   table.appendChild(tb);
-  card.appendChild(table);
+  scroller.appendChild(table);
+  card.appendChild(scroller);
   return card;
 }
 
