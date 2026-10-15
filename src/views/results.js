@@ -13,6 +13,11 @@ let resultsFilter = 'active';
 let compareSel = new Set();
 // Company filter for the position picker ('' = all).
 let resultsCompany = '';
+// Candidate name search — shared across the Ranked list and Pipeline sub-views.
+let resultsSearch = '';
+// Tracks whether the search box had focus, so we can restore it after the
+// app's full re-render (navigate recreates the input element).
+let searchHadFocus = false;
 
 // Maps a stage kind to a badge color class.
 function stageBadgeClass(stageId) {
@@ -104,12 +109,17 @@ export function renderResults(navigate, profileId) {
   toggle.appendChild(el('button', { class: `tab-btn${resultsView === 'ranked' ? ' active' : ''}`, onclick: () => { resultsView = 'ranked'; navigate('results', activeId); } }, 'Ranked list'));
   toggle.appendChild(el('button', { class: `tab-btn${resultsView === 'pipeline' ? ' active' : ''}`, onclick: () => { resultsView = 'pipeline'; navigate('results', activeId); } }, 'Pipeline'));
   bar.appendChild(toggle);
+
+  // Candidate name search — works for both the Ranked list and Pipeline sub-views.
+  // Shows the candidate's current hiring stage for quick lookup.
+  bar.appendChild(renderSearchBox(navigate, activeId));
+
   wrap.appendChild(bar);
 
   const profile = Profiles.get(activeId);
 
   if (resultsView === 'pipeline') {
-    wrap.appendChild(renderPipeline(navigate, profile));
+    wrap.appendChild(renderPipeline(navigate, profile, resultsSearch));
     return wrap;
   }
 
@@ -128,7 +138,10 @@ export function renderResults(navigate, profileId) {
   // Active = still in the running (not rejected, out, future-fit, or hired).
   const isActive = c => { const s = Stages.get(c.stage); return s && s.kind !== 'reject' && s.kind !== 'hired' && s.kind !== 'parked'; };
   const activeCands = all.filter(isActive);
+  const q = resultsSearch.trim().toLowerCase();
+  const matchesSearch = c => !q || String(c.name || '').toLowerCase().includes(q);
   const shown = (resultsFilter === 'active' ? activeCands : all)
+    .filter(matchesSearch)
     .sort((a, b) => (b.result.score || 0) - (a.result.score || 0));
 
   // Active / All filter toggle.
@@ -139,6 +152,77 @@ export function renderResults(navigate, profileId) {
 
   wrap.appendChild(renderRankedList(shown, profile, navigate));
   return wrap;
+}
+
+// Candidate name search box. Filters the ranked list / pipeline below, and
+// surfaces the matching candidates' current hiring stage for a quick lookup.
+function renderSearchBox(navigate, activeId) {
+  const row = el('div', { style: 'display:flex;gap:8px;align-items:center;margin-top:12px' });
+
+  const input = el('input', {
+    type: 'search',
+    placeholder: 'Search candidate by name…',
+    value: resultsSearch,
+    style: 'flex:1;max-width:360px',
+    'aria-label': 'Search candidate by name',
+  });
+  // The app re-renders the whole view on navigate(), which recreates this
+  // input. Re-focus and restore the caret so typing is never interrupted.
+  if (searchHadFocus) {
+    requestAnimationFrame(() => {
+      input.focus();
+      const n = input.value.length;
+      try { input.setSelectionRange(n, n); } catch { /* search inputs may reject */ }
+    });
+  }
+  input.addEventListener('focus', () => { searchHadFocus = true; });
+  input.addEventListener('blur', () => { searchHadFocus = false; });
+  // Debounced re-render so we're not rebuilding the view on every keystroke.
+  let t;
+  input.addEventListener('input', () => {
+    resultsSearch = input.value;
+    clearTimeout(t);
+    t = setTimeout(() => navigate('results', activeId), 160);
+  });
+  row.appendChild(input);
+
+  if (resultsSearch.trim()) {
+    row.appendChild(el('button', {
+      class: 'btn btn-sm btn-ghost',
+      onclick: () => { resultsSearch = ''; navigate('results', activeId); },
+    }, 'Clear'));
+  }
+
+  const box = el('div');
+  box.appendChild(row);
+
+  // Quick stage lookup: list every match (across all stages) with its stage
+  // badge, so you can tell where someone sits without scanning the table.
+  const q = resultsSearch.trim().toLowerCase();
+  if (q) {
+    const matches = Candidates.byProfile(activeId)
+      .filter(c => c.result && String(c.name || '').toLowerCase().includes(q))
+      .sort((a, b) => (b.result.score || 0) - (a.result.score || 0));
+
+    const hits = el('div', { class: 'search-hits', style: 'margin-top:10px;display:flex;flex-wrap:wrap;gap:8px' });
+    if (!matches.length) {
+      hits.appendChild(el('div', { class: 'muted', style: 'font-size:12px' }, `No candidates match “${esc(resultsSearch.trim())}”.`));
+    } else {
+      matches.forEach(c => {
+        const chip = el('button', {
+          class: 'search-hit',
+          style: 'display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--border,#e5e7eb);border-radius:999px;background:var(--bg,#fff);cursor:pointer;font-size:13px',
+          onclick: () => navigate('candidate', c.id),
+          title: 'Open candidate',
+        });
+        chip.innerHTML = `<strong>${esc(c.name)}</strong><span class="badge ${stageBadgeClass(c.stage)}">${esc(Stages.label(c.stage))}</span>`;
+        hits.appendChild(chip);
+      });
+    }
+    box.appendChild(hits);
+  }
+
+  return box;
 }
 
 // Clean, scannable ranked list — one row per candidate, click to drill in.
