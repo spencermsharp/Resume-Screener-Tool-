@@ -10,6 +10,8 @@ let resultsView = 'ranked';
 // Stage filter for the ranked list: '' = all stages, or a specific stage id to
 // see everyone currently in that stage.
 let resultsStage = '';
+// Candidate detail: toggles the inline edit form for name/email/phone/years.
+let editingDetails = false;
 // Compare selection (candidate ids) — session-scoped.
 let compareSel = new Set();
 // Company filter for the position picker ('' = all).
@@ -151,19 +153,16 @@ export function renderResults(navigate, profileId) {
   const activeShown = base.filter(c => !isOut(c)).sort(byScore);
   const outShown = base.filter(isOut).sort(byScore);
 
-  wrap.appendChild(renderFilterBar(stages, all, navigate, activeId));
-
-  // Search sits directly above the list.
-  wrap.appendChild(renderSearchBox(navigate, activeId));
+  // Stage filter + search live on ONE row to save vertical space.
+  wrap.appendChild(renderFilterBar(stages, all, navigate, activeId, true));
 
   wrap.appendChild(renderRankedList(activeShown, outShown, profile, navigate));
   return wrap;
 }
 
-// Filter bar for the ranked list: just a stage dropdown so you can see
-// everyone currently in a given hiring stage. (Active vs rejected is now shown
-// inline via a divider in the list itself — no separate toggle needed.)
-function renderFilterBar(stages, all, navigate, activeId) {
+// Filter bar for the ranked list: a stage dropdown + the name search, on one
+// row. (Active vs rejected is shown inline via a divider in the list itself.)
+function renderFilterBar(stages, all, navigate, activeId, withSearch) {
   const bar = el('div', { class: 'results-filterbar' });
 
   // Stage filter dropdown — "see everyone in that stage".
@@ -181,13 +180,17 @@ function renderFilterBar(stages, all, navigate, activeId) {
   stageWrap.appendChild(sel);
   bar.appendChild(stageWrap);
 
+  // Search box shares the row (grows to fill remaining width).
+  if (withSearch) bar.appendChild(renderSearchBox(navigate, activeId));
+
   return bar;
 }
 
 // Candidate name search box. Filters the ranked list / pipeline below, and
 // surfaces the matching candidates' current hiring stage for a quick lookup.
 function renderSearchBox(navigate, activeId) {
-  const row = el('div', { class: 'search-row' });
+  const row = el('div', { class: 'search-row filter-field' });
+  row.appendChild(el('label', {}, 'Search'));
 
   const input = el('input', {
     type: 'search',
@@ -213,17 +216,19 @@ function renderSearchBox(navigate, activeId) {
     clearTimeout(t);
     t = setTimeout(() => navigate('results', activeId), 160);
   });
-  row.appendChild(input);
 
+  // Input + Clear sit on one line; chips (if any) flow below.
+  const inputRow = el('div', { class: 'search-input-row' });
+  inputRow.appendChild(input);
   if (resultsSearch.trim()) {
-    row.appendChild(el('button', {
+    inputRow.appendChild(el('button', {
       class: 'btn btn-sm btn-ghost',
       onclick: () => { resultsSearch = ''; navigate('results', activeId); },
     }, 'Clear'));
   }
+  row.appendChild(inputRow);
 
-  const box = el('div');
-  box.appendChild(row);
+  const box = row;
 
   // Quick stage lookup: list every match (across all stages) with its stage
   // badge, so you can tell where someone sits without scanning the table.
@@ -271,10 +276,17 @@ function renderRankedList(activeCands, outCands, profile, navigate) {
   subRow.appendChild(exportBtn);
   card.appendChild(subRow);
 
-  // Compare bar — appears when candidates are selected.
-  const selValid = [...compareSel].filter(id => allCands.some(c => c.id === id));
-  compareSel = new Set(selValid);
-  if (compareSel.size) {
+  // Drop any stale selections (ids no longer in the list).
+  compareSel = new Set([...compareSel].filter(id => allCands.some(c => c.id === id)));
+
+  // Compare bar lives in a stable slot so we can refresh it in place when a
+  // checkbox toggles — WITHOUT a full re-render (which would reset scroll).
+  const compareSlot = el('div');
+  card.appendChild(compareSlot);
+
+  const renderCompareBar = () => {
+    compareSlot.innerHTML = '';
+    if (!compareSel.size) return;
     const ids = [...compareSel];
     const bar = el('div', { class: 'compare-bar' });
     bar.appendChild(el('span', {}, `${compareSel.size} selected`));
@@ -293,10 +305,10 @@ function renderRankedList(activeCands, outCands, profile, navigate) {
     } else if (compareSel.size > 4) {
       right.appendChild(el('span', { class: 'muted', style: 'font-size:12px;align-self:center' }, 'Compare fits up to 4'));
     }
-    right.appendChild(el('button', { class: 'btn btn-sm btn-ghost', onclick: () => { compareSel.clear(); navigate('results', profile.id); } }, 'Clear'));
+    right.appendChild(el('button', { class: 'btn btn-sm btn-ghost', onclick: () => { compareSel.clear(); renderCompareBar(); syncRowStates(); } }, 'Clear'));
     bar.appendChild(right);
-    card.appendChild(bar);
-  }
+    compareSlot.appendChild(bar);
+  };
 
   // Empty state (e.g. a stage with nobody, or a search with no match).
   if (!total) {
@@ -319,6 +331,12 @@ function renderRankedList(activeCands, outCands, profile, navigate) {
   </tr></thead>`;
   const tb = el('tbody');
 
+  // Track checkboxes so "Clear" can untick them without a full re-render.
+  const checkboxes = new Map(); // id -> input
+  const syncRowStates = () => {
+    checkboxes.forEach((cb, id) => { cb.checked = compareSel.has(id); });
+  };
+
   // Build a candidate row. `n` is the running rank number across both groups.
   const addRow = (c, n, dimmed) => {
     const r = c.result;
@@ -331,15 +349,17 @@ function renderRankedList(activeCands, outCands, profile, navigate) {
     const fitBits = [`${matchedN}/${totalN} criteria`];
     if (missReq) fitBits.push(`${missReq} required missing`);
 
-    // Compare checkbox (max 4).
+    // Compare checkbox. Toggles selection and refreshes the compare bar in
+    // place — no full re-render, so your scroll position stays put.
     const cbTd = el('td');
     const cb = el('input', { type: 'checkbox' });
     cb.checked = compareSel.has(c.id);
+    checkboxes.set(c.id, cb);
     cb.onclick = (e) => {
       e.stopPropagation();
       if (cb.checked) compareSel.add(c.id);
       else compareSel.delete(c.id);
-      navigate('results', profile.id);
+      renderCompareBar();
     };
     cbTd.appendChild(cb);
     tr.appendChild(cbTd);
@@ -380,6 +400,8 @@ function renderRankedList(activeCands, outCands, profile, navigate) {
   table.appendChild(tb);
   scroller.appendChild(table);
   card.appendChild(scroller);
+
+  renderCompareBar();  // show the bar if a selection carried over
   return card;
 }
 
@@ -394,6 +416,8 @@ export function renderCandidate(navigate, candId) {
   wrap.appendChild(el('button', { class: 'btn btn-sm btn-ghost', style: 'margin-bottom:14px', onclick: () => navigate('results', c.profileId) }, '← Back to results'));
 
   const card = el('div', { class: 'card' });
+  const p = c.parsed || {};
+
   const header = el('div', { style: 'display:flex;align-items:center;gap:16px' });
   const headerInfo = el('div', { style: 'display:flex;align-items:center;gap:16px;flex:1' });
   headerInfo.innerHTML = `
@@ -404,7 +428,10 @@ export function renderCandidate(navigate, candId) {
     </div>
   `;
   header.appendChild(headerInfo);
-  // Delete lives top-right of the candidate card.
+  // Edit + Delete live top-right of the candidate card.
+  if (!editingDetails) {
+    header.appendChild(el('button', { class: 'btn btn-sm', onclick: () => { editingDetails = true; navigate('candidate', c.id); } }, '✎ Edit details'));
+  }
   header.appendChild(el('button', { class: 'btn btn-sm btn-danger', onclick: async () => {
     const ok = await confirmDialog({
       title: 'Delete this candidate?',
@@ -415,11 +442,15 @@ export function renderCandidate(navigate, candId) {
   } }, 'Delete'));
   card.appendChild(header);
 
-  // Contact (best-effort from baseline parser)
-  const p = c.parsed || {};
-  const contact = el('div', { class: 'grid grid-3', style: 'margin:16px 0' },
-    miniField('Email', p.email), miniField('Phone', p.phone), miniField('Years (detected)', p.years != null ? String(p.years) : ''));
-  card.appendChild(contact);
+  // Details — read-only cards, or an inline edit form. Name/email/phone/years
+  // are auto-filled from the resume but fully editable here.
+  if (editingDetails) {
+    card.appendChild(renderDetailsEditor(c, navigate));
+  } else {
+    const contact = el('div', { class: 'grid grid-3', style: 'margin:16px 0' },
+      miniField('Email', p.email), miniField('Phone', p.phone), miniField('Years', p.years != null ? String(p.years) : ''));
+    card.appendChild(contact);
+  }
 
   // ── Stage controls (the hiring pipeline) ──────────────────────────────────
   card.appendChild(renderStageControls(c, profile, navigate));
@@ -719,6 +750,60 @@ function miniField(label, val) {
   const d = el('div');
   d.innerHTML = `<div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.05em">${label}</div><div>${esc(val || '—')}</div>`;
   return d;
+}
+
+// Inline editor for the auto-filled details (name, email, phone, years).
+// Saves name at the top level and the rest into `parsed`.
+function renderDetailsEditor(c, navigate) {
+  const p = c.parsed || {};
+  const box = el('div', { style: 'margin:16px 0' });
+
+  const nameIn = el('input', { type: 'text', value: c.name || '', placeholder: 'Full name' });
+  const emailIn = el('input', { type: 'email', value: p.email || '', placeholder: 'name@example.com' });
+  const phoneIn = el('input', { type: 'tel', value: p.phone || '', placeholder: 'Phone' });
+  const yearsIn = el('input', { type: 'number', value: p.years != null ? String(p.years) : '', placeholder: 'Years', min: '0', step: '1' });
+
+  box.appendChild(labeled('Name', nameIn));
+  const grid = el('div', { class: 'grid grid-3', style: 'margin-top:12px' });
+  grid.appendChild(labeled('Email', emailIn));
+  grid.appendChild(labeled('Phone', phoneIn));
+  grid.appendChild(labeled('Years of experience', yearsIn));
+  box.appendChild(grid);
+
+  const err = el('div', { class: 'muted', style: 'color:var(--red);font-size:12px;margin-top:8px;display:none' });
+  box.appendChild(err);
+
+  const actions = el('div', { style: 'display:flex;gap:8px;margin-top:14px' });
+  const save = el('button', { class: 'btn btn-primary btn-sm', onclick: () => {
+    const name = nameIn.value.trim();
+    if (!name) { err.textContent = 'Name can’t be empty.'; err.style.display = 'block'; return; }
+    const yearsRaw = yearsIn.value.trim();
+    let years = null;
+    if (yearsRaw !== '') {
+      years = Number(yearsRaw);
+      if (!Number.isFinite(years) || years < 0) { err.textContent = 'Years must be a number of 0 or more.'; err.style.display = 'block'; return; }
+    }
+    const email = emailIn.value.trim();
+    const phone = phoneIn.value.trim();
+    Candidates.update(c.id, {
+      name,
+      parsed: { ...p, email, phone, years },
+    });
+    // Keep the linked global Person in sync so cross-job history & matching
+    // reflect the correction too.
+    if (c.personId) People.update(c.personId, { name, email, phone });
+    editingDetails = false;
+    navigate('candidate', c.id);
+  } }, 'Save');
+  const cancel = el('button', { class: 'btn btn-sm btn-ghost', onclick: () => { editingDetails = false; navigate('candidate', c.id); } }, 'Cancel');
+  actions.appendChild(save);
+  actions.appendChild(cancel);
+  box.appendChild(actions);
+
+  // Submit on Enter from any field.
+  [nameIn, emailIn, phoneIn, yearsIn].forEach(inp => inp.addEventListener('keydown', e => { if (e.key === 'Enter') save.click(); }));
+
+  return box;
 }
 
 // Small labeled form control wrapper.

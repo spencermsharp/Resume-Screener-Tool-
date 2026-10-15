@@ -367,8 +367,10 @@ h3 { font-size: 14px; font-weight: 600; }
 /* All colors use theme tokens so this reads correctly in light AND dark. */
 
 /* Candidate name search box + its live stage-lookup chips. */
-.search-row { display: flex; gap: 8px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
-.search-row input[type="search"] { flex: 1; max-width: 360px; }
+.search-row { min-width: 220px; }
+.results-filterbar .search-row { flex: 1; }
+.search-input-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.search-input-row input[type="search"] { flex: 1; min-width: 180px; max-width: 420px; }
 .search-hits { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; }
 .search-hit {
   display: inline-flex; align-items: center; gap: 8px;
