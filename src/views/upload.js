@@ -1,6 +1,6 @@
 // ── UPLOAD & SCREEN VIEW ──────────────────────────────────────────────────────
 import { Profiles, Candidates, People, Blacklist, Settings, Stages } from '../data/db.js';
-import { extractText, lightStructure } from '../data/parser.js';
+import { extractText, lightStructure, nameFromFileName } from '../data/parser.js';
 import { screenCandidate } from '../data/screener.js';
 import { el, esc, scoreClass } from '../utils.js';
 
@@ -261,7 +261,7 @@ export function renderUpload(navigate) {
           if (res.ok && res.rawText.trim()) {
             // Dedupe/known-person detection BEFORE screening.
             const struct = lightStructure(res.rawText);
-            const nm = struct.name || displayName;
+            const nm = struct.name || nameFromFileName(displayName);
             const banned = Blacklist.match({ name: nm, email: struct.email, phone: struct.phone });
             const known = banned ? null : People.match({ name: nm, email: struct.email, phone: struct.phone });
             toScreen.push({ fileName: displayName, rawText: res.rawText, file: f, _struct: struct, _banned: banned, _known: known });
@@ -323,7 +323,7 @@ export function renderUpload(navigate) {
           }
 
           const cand = Candidates.create({
-            name: item.name || struct.name || item.fileName || 'Unknown Candidate',
+            name: item.name || struct.name || nameFromFileName(item.fileName) || 'Unknown Candidate',
             fileName: item.fileName,
             profileId,
             rawText: item.rawText,

@@ -28,13 +28,73 @@ export function lightStructure(rawText) {
   const text = rawText || '';
   const email = (text.match(/[\w.+-]+@[\w-]+\.[\w.-]+/) || [])[0] || '';
   const phone = (text.match(/(\+?\d[\d\s().-]{7,}\d)/) || [])[0] || '';
-  // Guess the name from the first non-empty line that isn't a contact detail.
-  let name = '';
-  for (const line of text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)) {
-    if (/@|\d{3}/.test(line)) continue;
-    if (line.length <= 60) { name = line; break; }
-  }
+  const name = guessName(text, email);
   return { name, email, phone };
+}
+
+// Lines that are resume headings/labels, not a person's name.
+const NAME_STOPWORDS = /\b(resume|résumé|cv|curriculum\s+vitae|profile|summary|objective|contact|address|phone|email|e-mail|linkedin|github|portfolio|references|experience|education|skills|confidential)\b/i;
+
+// Try to pull the candidate's actual name out of the resume text. Resumes
+// almost always lead with the name, so we scan the first several lines and
+// pick the first that genuinely looks like a person's name — skipping emails,
+// phone numbers, URLs, addresses, and section headings.
+function guessName(text, email = '') {
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean).slice(0, 12);
+
+  for (const line of lines) {
+    if (looksLikeName(line)) return cleanName(line);
+  }
+
+  // Fallback: derive a name from the email local-part (e.g. "jane.doe@…" → "Jane Doe").
+  if (email) {
+    const local = email.split('@')[0].replace(/\d+/g, '');
+    const parts = local.split(/[._-]+/).filter(p => p.length > 1);
+    if (parts.length >= 2) return cleanName(parts.join(' '));
+  }
+
+  return '';
+}
+
+// Heuristic: is this line plausibly a person's name?
+function looksLikeName(line) {
+  if (!line || line.length > 60) return false;
+  if (/[@/\\]|www\.|https?:/i.test(line)) return false;   // email / URL
+  if (/\d/.test(line)) return false;                        // phone / address / dates
+  if (NAME_STOPWORDS.test(line)) return false;              // section heading
+  if (/[,:;|•·]/.test(line)) return false;                  // label/credential list
+
+  // 2–4 words, each starting with a letter. Accepts "Jane Doe", "JANE DOE",
+  // "Jane A. Doe", "Mary-Jane O'Neil". Rejects single words and long sentences.
+  const words = line.split(/\s+/);
+  if (words.length < 2 || words.length > 4) return false;
+  return words.every(w => /^[A-Za-z][A-Za-z'.-]*$/.test(w));
+}
+
+// Normalize casing: "JANE DOE" / "jane doe" → "Jane Doe"; leave mixed case alone.
+function cleanName(raw) {
+  const s = raw.trim().replace(/\s+/g, ' ');
+  if (s === s.toUpperCase() || s === s.toLowerCase()) {
+    return s.toLowerCase().replace(/\b([a-z])([a-z'.-]*)/g, (_, a, b) => a.toUpperCase() + b);
+  }
+  return s;
+}
+
+// Turn a resume filename into a readable name as a LAST resort, so the UI never
+// shows raw filenames like "jane_doe_resume_v2.pdf". Strips the extension,
+// drops "resume"/"cv"/version tags, converts separators to spaces, Title-cases.
+export function nameFromFileName(fileName) {
+  if (!fileName) return '';
+  let base = String(fileName).split('/').pop().replace(/\.[^.]+$/, ''); // drop path + extension
+  base = base
+    .replace(/[_+]+/g, ' ')
+    .replace(/(?<=[a-z])(?=[A-Z])/g, ' ')               // camelCase → spaced
+    .replace(/\b(resume|résumé|cv|curriculum\s*vitae|final|updated|copy|v?\d+(\.\d+)?)\b/gi, ' ')
+    .replace(/[-.]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!base) return '';
+  return base.toLowerCase().replace(/\b([a-z])([a-z'’-]*)/g, (_, a, b) => a.toUpperCase() + b);
 }
 
 // pdf.js is loaded on demand (only when a PDF is dropped) so .txt stays fast
