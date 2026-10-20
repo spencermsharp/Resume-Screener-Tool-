@@ -42,12 +42,67 @@ export function extractYears(text) {
   return best;
 }
 
-function countKeywordHits(text, keywords) {
-  const t = (text || '').toLowerCase();
+// Normalize text for matching: lowercase, strip accents, collapse all runs of
+// whitespace (incl. the stray newlines PDF extraction injects mid-word) to a
+// single space, and standardize a few punctuation variants. This is what makes
+// "Quick\nBooks", "Quick Books" and "QuickBooks" all comparable.
+function normalizeForMatch(s) {
+  return String(s || '')
+    .toLowerCase()
+    .normalize('NFKD').replace(/[\u0300-\u036f]/g, '') // drop accents
+    .replace(/[\u2010-\u2015]/g, '-')                   // fancy dashes → hyphen
+    .replace(/[’']/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Build the set of string variants to look for a single keyword. Covers the
+// common ways a term shows up on resumes: as written, with/without internal
+// spaces (quickbooks ↔ quick books), and hyphen/space swaps.
+function keywordVariants(kw) {
+  const base = normalizeForMatch(kw);
+  if (!base) return [];
+  const variants = new Set([base]);
+  variants.add(base.replace(/[\s-]+/g, ''));   // "quick books" → "quickbooks"
+  variants.add(base.replace(/[\s-]+/g, ' '));  // "quick-books" → "quick books"
+  variants.add(base.replace(/\s+/g, '-'));     // "quick books" → "quick-books"
+  return [...variants].filter(Boolean);
+}
+
+// Does `haystack` contain `needle` as a whole word/phrase? For short, all-letter
+// tokens (<=4 chars, e.g. "qb", "sap") we require word boundaries so we don't
+// match inside unrelated words. Longer/phrase needles use a forgiving
+// space-insensitive contains so PDF spacing quirks don't block a hit.
+function phraseInText(haystackSpaced, haystackCompact, needle) {
+  if (!needle) return false;
+  const compactNeedle = needle.replace(/\s+/g, '');
+  const shortToken = /^[a-z0-9]{1,4}$/.test(compactNeedle);
+  if (shortToken) {
+    const re = new RegExp(`(^|[^a-z0-9])${compactNeedle}($|[^a-z0-9])`, 'i');
+    return re.test(haystackSpaced);
+  }
+  // Longer term: match ignoring spaces so "quick books" hits "quickbooks".
+  return haystackCompact.includes(compactNeedle) || haystackSpaced.includes(needle);
+}
+
+function countKeywordHits(text, keywords, label = '') {
+  const spaced = normalizeForMatch(text);        // single-spaced, accent-free
+  const compact = spaced.replace(/[\s-]+/g, '');  // spaces/hyphens removed
   const hits = [];
   for (const kw of keywords) {
     if (!kw) continue;
-    if (t.includes(String(kw).toLowerCase())) hits.push(kw);
+    const found = keywordVariants(kw).some(v => phraseInText(spaced, compact, v));
+    if (found) hits.push(kw);
+  }
+  // Fallback signal: the criterion LABEL itself may name the skill even when
+  // the user didn't add it as a keyword (e.g. label "QuickBooks experience").
+  // Only use distinctive label tokens (length > 4, not generic filler) so we
+  // don't create false positives on words like "experience" or "skills".
+  if (!hits.length && label) {
+    const GENERIC = new Set(['experience', 'skills', 'knowledge', 'proficiency', 'ability', 'strong', 'years', 'using', 'with', 'and', 'the', 'software', 'tools', 'tool', 'systems', 'system']);
+    for (const tok of normalizeForMatch(label).split(/[^a-z0-9]+/)) {
+      if (tok.length > 4 && !GENERIC.has(tok) && phraseInText(spaced, compact, tok)) { hits.push(tok); break; }
+    }
   }
   return hits;
 }
@@ -67,7 +122,7 @@ export function screenRuleBased(resumeText, profile) {
   for (const c of criteria) {
     const w = c.weight || 1;
     possible += w;
-    const hits = countKeywordHits(resumeText, c.keywords || []);
+    const hits = countKeywordHits(resumeText, c.keywords || [], c.label || '');
     if (hits.length) {
       earned += w;
       matched.push({ label: c.label, weight: w, hits });
@@ -152,23 +207,41 @@ function buildSystemPrompt() {
     'Score how well the RESUME meets the JOB CRITERIA provided.',
     'Base every judgment SOLELY on job-relevant skills and experience.',
     'NEVER infer or use age, gender, race, religion, national origin,',
-    'disability, or any other protected characteristic. If evidence for a',
-    'criterion is absent, mark it missing rather than guessing.',
+    'disability, or any other protected characteristic.',
+    '',
+    'HOW TO EVALUATE EACH CRITERION (apply to EVERY criterion, in order):',
+    '1. Read the criterion\'s label AND its "keywords" list. The keywords are',
+    '   the specific terms to hunt for in the resume.',
+    '2. Scan the ENTIRE resume for each keyword and for its common variants:',
+    '   - spacing/casing/punctuation differences (e.g. "QuickBooks" = "Quick',
+    '     Books" = "quickbooks"; "Node.js" = "NodeJS" = "node js"),',
+    '   - abbreviations and acronyms and their expansions (e.g. "QB"/"QBO" for',
+    '     QuickBooks; "SF"/"SFDC" for Salesforce; "GCP" for Google Cloud; "AP/AR"',
+    '     for accounts payable/receivable),',
+    '   - plurals, verb forms, and obvious misspellings,',
+    '   - PDF extraction artifacts that split or join words across line breaks.',
+    '3. Recognize EQUIVALENT evidence even when the exact term is absent (e.g.',
+    '   "reconciled monthly books in QuickBooks Online" satisfies a QuickBooks',
+    '   criterion; "closed $2M in new logos" satisfies a revenue/quota criterion).',
+    '4. Mark the criterion MATCHED if there is genuine supporting evidence',
+    '   anywhere in the resume; otherwise mark it MISSING. Do not guess — but do',
+    '   not miss a skill that is clearly present under a different name/spelling.',
     '',
     'Weigh each criterion by its weight (1-5). A missing REQUIRED criterion',
-    'should heavily reduce the score. Consider years of experience vs the',
-    "role's minimum. Recognize equivalent evidence (e.g. \"closed $2M in new",
-    'logos" satisfies a revenue/quota criterion even without the word "quota").',
+    "should heavily reduce the score. Consider years of experience vs the role's",
+    'minimum. These rules are general — they apply to any role or criterion.',
     '',
     'Return STRICT JSON ONLY, no markdown, with exactly this shape:',
     '{',
     '  "score": <integer 0-100>,',
-    '  "matched": [{"label": <string>, "weight": <number>}],',
+    '  "matched": [{"label": <string>, "weight": <number>, "evidence": <string: the exact resume phrase/term that satisfied it>}],',
     '  "missing": [{"label": <string>, "weight": <number>, "required": <boolean>}],',
     '  "yearsFound": <number>,',
     '  "explanation": <string, 2-4 sentences explaining the ranking>',
     '}',
-    'Every criterion listed in the job must appear in either matched or missing.',
+    'Use each criterion\'s EXACT label text in matched/missing so it can be',
+    'matched back. Every criterion listed in the job MUST appear in either',
+    'matched or missing — never omit one.',
   ].join('\n');
 }
 
@@ -180,6 +253,9 @@ function buildUserPrompt(resumeText, profile) {
     kind: c.kind || 'other',
     weight: c.weight || 1,
     required: !!c.required,
+    // Pass the user's keywords so the model knows exactly which terms (and
+    // their variants/abbreviations) to hunt for in the resume.
+    keywords: Array.isArray(c.keywords) ? c.keywords.filter(Boolean) : [],
   }));
 
   const job = {
@@ -213,28 +289,55 @@ function parseModelJson(text) {
   return JSON.parse(t);
 }
 
-// Normalize the model result into the engine's standard shape.
-function normalizeResult(raw, resumeText) {
+// Normalize the model result into the engine's standard shape. We RECONCILE the
+// model's matched/missing back against the profile's real criteria so the
+// weights/required flags are always correct and every criterion is accounted
+// for — even if the model's label text drifted slightly. This keeps the result
+// consistent for any role/criterion (not tied to any specific skill).
+function normalizeResult(raw, resumeText, profile) {
   const clampScore = Math.max(0, Math.min(100, Math.round(Number(raw.score) || 0)));
-  const matched = Array.isArray(raw.matched)
-    ? raw.matched.map(m => ({ label: String(m.label || ''), weight: Number(m.weight) || 1 }))
-    : [];
-  const missing = Array.isArray(raw.missing)
-    ? raw.missing.map(m => ({ label: String(m.label || ''), weight: Number(m.weight) || 1, required: !!m.required }))
-    : [];
   const yearsFound = Number.isFinite(Number(raw.yearsFound)) && Number(raw.yearsFound) > 0
     ? Number(raw.yearsFound)
     : extractYears(resumeText);
 
-  return {
-    score: clampScore,
-    matched,
-    missing,
-    yearsFound,
-    explanation: String(raw.explanation || 'AI screening completed.')
-      + ' First-level screen only — please review the full resume before deciding.',
-    engine: 'ai',
-  };
+  const criteria = (profile && Array.isArray(profile.criteria)) ? profile.criteria : [];
+
+  // If we don't have the profile (shouldn't happen), fall back to the raw shape.
+  if (!criteria.length) {
+    const matched = Array.isArray(raw.matched)
+      ? raw.matched.map(m => ({ label: String(m.label || ''), weight: Number(m.weight) || 1 }))
+      : [];
+    const missing = Array.isArray(raw.missing)
+      ? raw.missing.map(m => ({ label: String(m.label || ''), weight: Number(m.weight) || 1, required: !!m.required }))
+      : [];
+    return { score: clampScore, matched, missing, yearsFound, explanation: aiExplanation(raw), engine: 'ai' };
+  }
+
+  // Index the model's "matched" claims by normalized label for lookup.
+  const matchedByLabel = new Map();
+  (Array.isArray(raw.matched) ? raw.matched : []).forEach(m => {
+    matchedByLabel.set(normalizeForMatch(m.label), m);
+  });
+
+  const matched = [];
+  const missing = [];
+  for (const c of criteria) {
+    const w = c.weight || 1;
+    const hit = matchedByLabel.get(normalizeForMatch(c.label));
+    if (hit) {
+      const evidence = hit.evidence ? String(hit.evidence) : '';
+      matched.push(evidence ? { label: c.label, weight: w, evidence } : { label: c.label, weight: w });
+    } else {
+      missing.push({ label: c.label, weight: w, required: !!c.required });
+    }
+  }
+
+  return { score: clampScore, matched, missing, yearsFound, explanation: aiExplanation(raw), engine: 'ai' };
+}
+
+function aiExplanation(raw) {
+  return String(raw.explanation || 'AI screening completed.')
+    + ' First-level screen only — please review the full resume before deciding.';
 }
 
 export async function screenWithAI(resumeText, profile) {
@@ -267,7 +370,7 @@ export async function screenWithAI(resumeText, profile) {
   if (data && data.error) throw new Error(data.error);
 
   const parsed = parseModelJson(data.text);
-  return normalizeResult(parsed, resumeText);
+  return normalizeResult(parsed, resumeText, profile);
 }
 
 /**
