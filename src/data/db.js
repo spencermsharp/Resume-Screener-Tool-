@@ -27,6 +27,7 @@ const KEYS = {
   blacklist: 'qrs_blacklist',     // global blackball list (all companies)
   companies: 'qrs_companies',     // staffing: client companies
   placements: 'qrs_placements',   // staffing: active hires
+  aiConfig: 'qrs_ai_config',      // SHARED AI on/off (admin-controlled, all users)
 };
 
 /**
@@ -54,8 +55,10 @@ const SYNC = {
   // from different devices can't clobber each other — safety-critical list.
   [KEYS.blacklist]:  { kind: 'collection', table: 'blacklist' },
   [KEYS.stages]:     { kind: 'kv', kvKey: 'stages' },
-  // NOTE: settings (current workspace, AI toggle) are deliberately NOT synced —
-  // they're per-device UI state, not shared data.
+  // AI on/off is shared: an admin sets it once and every user's screening uses it.
+  [KEYS.aiConfig]:   { kind: 'kv', kvKey: 'ai_config' },
+  // NOTE: settings (current workspace) are deliberately NOT synced — they're
+  // per-device UI state, not shared data.
 };
 
 // Lazily-loaded sync deps (avoids a hard import cycle at module load).
@@ -829,6 +832,41 @@ export async function initCloudSync(onPulled) {
   setInterval(syncNow, 15000);                // periodic source-of-truth refresh
   if (typeof window !== 'undefined') window.addEventListener('online', syncNow);
 }
+
+// ── SHARED AI CONFIG (admin-controlled) ───────────────────────────────────────
+// One setting for the whole team: when an admin turns AI on, EVERY user's
+// screening runs through Claude; when off, everyone uses the rules engine.
+// Stored in Supabase (app_kv 'ai_config') so it's identical on all devices.
+// Defaults to OFF until an admin turns it on.
+const AI_DEFAULT = { enabled: false, model: '' };
+export const AIConfig = {
+  get() { return { ...AI_DEFAULT, ...(backend.read(KEYS.aiConfig) || {}) }; },
+  // Admin-only in the UI. Records who changed it and when.
+  set(patch, byName = '') {
+    const next = { ...this.get(), ...patch, updatedAt: new Date().toISOString(), updatedBy: byName };
+    backend.write(KEYS.aiConfig, next);
+    return next;
+  },
+  // Pull the latest value straight from Supabase (call right before screening
+  // so an admin's change applies immediately, not on the next 15s sync).
+  // Never clobbers a local change that hasn't finished uploading.
+  async refresh() {
+    try {
+      const { isConfigured } = await import('../auth/supabaseClient.js');
+      if (!isConfigured()) return this.get();
+      const { pendingRecordIds } = await wq();
+      const pend = pendingRecordIds().app_kv;
+      if (pend && pend.upsert.has('ai_config')) return this.get();
+      const r = await rest();
+      const rows = await r.sbSelect('app_kv');
+      if (!Array.isArray(rows)) return this.get();      // fetch failed — keep cache
+      const row = rows.find(x => x.key === 'ai_config');
+      if (row && row.value != null) localStorage.setItem(KEYS.aiConfig, JSON.stringify(row.value));
+      else localStorage.removeItem(KEYS.aiConfig);      // never set → default (off)
+    } catch (e) { console.warn('[ai] refresh failed, using cached setting', e); }
+    return this.get();
+  },
+};
 
 // ── SETTINGS REPOSITORY ───────────────────────────────────────────────────────
 export const Settings = {

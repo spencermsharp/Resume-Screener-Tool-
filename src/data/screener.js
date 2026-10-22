@@ -9,7 +9,7 @@
  *   1. screenRuleBased()  — works today, no network, fully transparent.
  *   2. screenWithAI()     — ⚠️ SEAM for the IDE handoff. Not wired yet.
  *
- * `screenCandidate()` picks the mode based on Settings.ai.enabled, so
+ * `screenCandidate()` picks the mode based on the shared AIConfig, so
  * the rest of the app doesn't care which engine ran. Both return the
  * same shape:
  *   { score:0-100, matched:[{label,weight}], missing:[{label,weight,required}],
@@ -21,7 +21,7 @@
  * (age, gender, race, religion, national origin, disability, etc.).
  */
 
-import { Settings } from './db.js';
+import { AIConfig } from './db.js';
 
 // Rough years-of-experience sniff from resume text (baseline heuristic).
 export function extractYears(text) {
@@ -338,7 +338,7 @@ function aiExplanation(raw) {
 }
 
 export async function screenWithAI(resumeText, profile) {
-  const ai = Settings.get().ai || {};
+  const ai = AIConfig.get();
   const body = {
     system: buildSystemPrompt(),
     user: buildUserPrompt(resumeText, profile),
@@ -372,10 +372,12 @@ export async function screenWithAI(resumeText, profile) {
 
 /**
  * PUBLIC ENTRY — the app calls this; it chooses the engine.
+ * The engine is decided by the SHARED, admin-controlled AI setting, so every
+ * user screens the same way.
  */
 export async function screenCandidate(resumeText, profile) {
-  const ai = Settings.get().ai;
-  if (ai && ai.enabled) {
+  const ai = AIConfig.get();
+  if (ai.enabled) {
     try { return await screenWithAI(resumeText, profile); }
     catch (e) { console.warn('AI screen failed, falling back to rules:', e.message); }
   }

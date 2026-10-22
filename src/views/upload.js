@@ -1,5 +1,5 @@
 // ── UPLOAD & SCREEN VIEW ──────────────────────────────────────────────────────
-import { Profiles, Candidates, People, Blacklist, Settings, Stages } from '../data/db.js';
+import { Profiles, Candidates, People, Blacklist, Settings, Stages, AIConfig } from '../data/db.js';
 import { extractText, lightStructure, nameFromFileName } from '../data/parser.js';
 import { screenCandidate } from '../data/screener.js';
 import { el, esc, scoreClass } from '../utils.js';
@@ -88,6 +88,14 @@ export function renderUpload(navigate) {
   `;
   card.appendChild(form);
   wrap.appendChild(card);
+
+  // Show which engine this run will use (shared, admin-controlled setting).
+  const engineHint = ai => ai.enabled
+    ? '🤖 AI screening is ON (set by admin). Falls back to rules on any error.'
+    : '📏 Rules engine (AI is off — an admin can turn it on from the Dashboard).';
+  const hintEl = form.querySelector('#u-hint');
+  hintEl.textContent = engineHint(AIConfig.get());
+  AIConfig.refresh().then(ai => { if (hintEl.isConnected) hintEl.textContent = engineHint(ai); });
 
   const resultMount = el('div');
   wrap.appendChild(resultMount);
@@ -226,6 +234,9 @@ export function renderUpload(navigate) {
     const origLabel = runBtn.textContent;
     runBtn.disabled = true;
     runBtn.textContent = '⏳ Screening…';
+
+    // Use the admin's CURRENT AI setting for this run (fresh from Supabase).
+    await AIConfig.refresh();
 
     // Progress bar: total work = files to parse + (parsed items + pasted) to screen.
     // We don't know how many files parse successfully up front, so we advance

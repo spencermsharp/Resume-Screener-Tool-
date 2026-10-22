@@ -1,6 +1,7 @@
 // ── DASHBOARD VIEW ────────────────────────────────────────────────────────────
-import { Profiles, Candidates, Settings, Stages } from '../data/db.js';
+import { Profiles, Candidates, Settings, Stages, AIConfig } from '../data/db.js';
 import { el, esc } from '../utils.js';
+import { isAdmin, currentUser } from '../auth/auth.js';
 
 // Selected efficiency date range (session-scoped): '30'|'90'|'180'|'365'|'all'|'custom'.
 let dashRange = '90';
@@ -12,7 +13,6 @@ export function renderDashboard(navigate) {
   const profiles = Profiles.byWorkspace(ws);
   const wsProfileIds = new Set(profiles.map(p => p.id));
   const candidates = Candidates.all().filter(c => wsProfileIds.has(c.profileId));
-  const ai = Settings.get().ai;
 
   const wrap = el('div');
 
@@ -208,22 +208,32 @@ async function renderAIBanner(banner, navigate) {
     return;
   }
 
-  // AI is available — let the user toggle it for screening runs.
-  const ai = Settings.get().ai || {};
+  // AI is available. The on/off setting is SHARED across the team and only an
+  // admin can change it; everyone else just sees which engine is in use.
+  const ai = await AIConfig.refresh();
+  const admin = isAdmin();
+  banner.innerHTML = '';
   banner.className = `banner ${ai.enabled ? 'banner-info' : 'banner-warn'}`;
   const msg = el('span');
+  const scope = ' for <strong>everyone</strong>';
   msg.innerHTML = ai.enabled
-    ? `🤖 AI screening is <strong>ON</strong> (Claude ${esc(ai.model || model)}). Falls back to rules on any error.`
-    : `🔑 Claude is available. AI is <strong>off</strong> — turn it on to screen with Claude.`;
+    ? `🤖 AI screening is <strong>ON</strong>${scope} (Claude ${esc(ai.model || model)}). Falls back to rules on any error.`
+    : `📏 AI screening is <strong>OFF</strong>${scope} — resumes are scored with the rules engine.`;
+  if (!admin) {
+    msg.innerHTML += ' <span class="muted">Set by an admin.</span>';
+    banner.append(msg);
+    return;
+  }
   const toggle = el('button', {
     class: `btn btn-sm ${ai.enabled ? '' : 'btn-primary'}`,
     style: 'margin-left:auto',
     onclick: () => {
-      const cur = Settings.get().ai || {};
-      Settings.update({ ai: { ...cur, enabled: !cur.enabled, provider: 'anthropic', model: cur.model || model } });
+      const cur = AIConfig.get();
+      const u = currentUser();
+      AIConfig.set({ enabled: !cur.enabled, model: cur.model || model }, u ? u.name : '');
       navigate('dashboard');
     },
-  }, ai.enabled ? 'Turn AI off' : 'Turn AI on');
+  }, ai.enabled ? 'Turn AI off for everyone' : 'Turn AI on for everyone');
   banner.append(msg, toggle);
 }
 
