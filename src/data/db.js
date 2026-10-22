@@ -291,6 +291,103 @@ function maybeBackfillNames() {
   return true;
 }
 
+const RESCORE_FLAG = 'qrs_rescore_rules_v1';
+let _rescoring = false;
+
+// ONE-TIME RE-SCORE: candidates screened before the improved rules matcher
+// (variant/spacing-tolerant keywords) kept their old scores, so real skills
+// like "QuickBooks Online" could still show as missing. Re-run the CURRENT
+// rules engine on each rules-scored candidate's stored resume text and update
+// ONLY `result` (score + matched/missing + explanation) where it changed.
+// Stage, notes, edited details, etc. are never touched. AI-scored results are
+// left alone. Pushes straight to Supabase in small batches and only sets the
+// done-flag once every batch succeeds, so a failed upload retries next sync.
+//   afterPull: true when called right after a server pull (cloud mode). In
+//   cloud mode we refuse to run on a pre-pull cache so stale data can never be
+//   written back to the server.
+async function maybeRescoreRules(afterPull = false) {
+  if (_rescoring || localStorage.getItem(RESCORE_FLAG) != null) return;
+  _rescoring = true;
+  try {
+    const { isConfigured } = await import('../auth/supabaseClient.js');
+    const cloud = isConfigured();
+    if (cloud && !afterPull) return;
+
+    const cands = backend.read(KEYS.candidates) || [];
+    const profiles = backend.read(KEYS.profiles) || [];
+    if (!cands.length || !profiles.length) return;  // no data yet — try after the pull
+
+    // Don't race an in-flight local edit to a candidate; try again next sync.
+    if (cloud) {
+      const { pendingRecordIds } = await wq();
+      const pend = pendingRecordIds().candidates;
+      if (pend && (pend.upsert.size || pend.del.size)) return;
+    }
+
+    const { screenRuleBased } = await import('./screener.js');
+    const profById = {}; profiles.forEach(p => { profById[String(p.id)] = p; });
+    const sig = r => JSON.stringify([r?.score, (r?.matched || []).map(m => m.label).sort()]);
+
+    const updates = new Map(); // candidate id -> new result
+    for (const c of cands) {
+      if (!c.result || c.result.engine !== 'rules') continue;
+      if (!c.rawText || !c.rawText.trim()) continue;
+      const prof = profById[String(c.profileId)];
+      if (!prof || !Array.isArray(prof.criteria) || !prof.criteria.length) continue;
+      const next = screenRuleBased(c.rawText, prof);
+      if (sig(next) !== sig(c.result)) updates.set(String(c.id), next);
+    }
+
+    if (!updates.size) {
+      localStorage.setItem(RESCORE_FLAG, String(Date.now()));
+      console.log('[rescore] nothing to change');
+      return;
+    }
+
+    // Local-only mode: the cache IS the data — just write it.
+    if (!cloud) {
+      const list = backend.read(KEYS.candidates) || [];
+      list.forEach(c => { const r = updates.get(String(c.id)); if (r) c.result = r; });
+      backend.write(KEYS.candidates, list);
+      localStorage.setItem(RESCORE_FLAG, String(Date.now()));
+      console.log('[rescore] updated', updates.size, 'candidates (local)');
+      return;
+    }
+
+    // Cloud mode: upload in batches (resume text makes rows large), merging the
+    // new result into the LATEST cached copy of each record right before send.
+    const { sbUpsert } = await rest();
+    const ids = [...updates.keys()];
+    const BATCH = 20;
+    let done = 0;
+    for (let i = 0; i < ids.length; i += BATCH) {
+      const chunk = ids.slice(i, i + BATCH);
+      const latest = backend.read(KEYS.candidates) || [];
+      const byId = {}; latest.forEach(c => { byId[String(c.id)] = c; });
+      const stamp = new Date().toISOString();
+      const rows = chunk
+        .filter(id => byId[id])
+        .map(id => ({ id, data: { ...byId[id], result: updates.get(id) }, updated_at: stamp }));
+      const res = await sbUpsert('candidates', rows);
+      if (!res.ok) {
+        console.warn('[rescore] batch failed — will retry next sync:', res.error);
+        return; // flag NOT set → the whole pass reruns (already-updated rows are no-ops)
+      }
+      // Mirror the confirmed server write into the local cache (no re-queue).
+      const fresh = backend.read(KEYS.candidates) || [];
+      fresh.forEach(c => { const r = rows.find(x => x.id === String(c.id)); if (r) c.result = r.data.result; });
+      localStorage.setItem(KEYS.candidates, JSON.stringify(fresh));
+      done += rows.length;
+    }
+    localStorage.setItem(RESCORE_FLAG, String(Date.now()));
+    console.log('[rescore] updated', done, 'candidates');
+  } catch (e) {
+    console.warn('[rescore] failed — will retry next sync', e);
+  } finally {
+    _rescoring = false;
+  }
+}
+
 // ── INIT ───────────────────────────────────────────────────────────────────
 export function initDB() {
   if (backend.read(KEYS.profiles) == null) backend.write(KEYS.profiles, SEED_PROFILES);
@@ -318,6 +415,9 @@ export function initDB() {
   // forceResync()/pull — the flag guard makes it run exactly once, whenever the
   // candidate data is actually present.
   maybeBackfillNames();
+  // One-time rules re-score. Local-only mode runs here; in cloud mode it waits
+  // for the post-pull call (it self-checks), so stale cache is never uploaded.
+  maybeRescoreRules(false);
 
   // Drop the retired stage from any saved stages list.
   const savedStages = backend.read(KEYS.stages);
@@ -677,6 +777,8 @@ export async function forceResync() {
   // Real server data is now in the cache — run the one-time name backfill (it
   // self-guards, so this is a no-op once it has run against real data).
   if (ok) { try { maybeBackfillNames(); } catch (e) { console.warn('[backfill] failed', e); } }
+  // Awaited so the first screen after boot already shows the corrected scores.
+  if (ok) await maybeRescoreRules(true);
   const pending = hasPendingWrites();
   setSyncStatus({ status: !ok ? 'error' : (pending ? 'pending' : 'synced'), lastSync: new Date().toISOString() });
   if (_onPulledCb) _onPulledCb();
@@ -703,6 +805,7 @@ export async function syncNow() {
     const ok = await backend.pullAll();       // then mirror server down
     // One-time name backfill, once real data is present (self-guarded no-op).
     if (ok) { try { maybeBackfillNames(); } catch (e) { console.warn('[backfill] failed', e); } }
+    if (ok) await maybeRescoreRules(true);
     const pending = queueStatus().pending;
     if (!ok) setSyncStatus({ status: 'error', pending });
     else if (pending > 0 || hasPendingWrites()) setSyncStatus({ status: 'pending', pending });

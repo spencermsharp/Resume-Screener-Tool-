@@ -94,15 +94,12 @@ function countKeywordHits(text, keywords, label = '') {
     const found = keywordVariants(kw).some(v => phraseInText(spaced, compact, v));
     if (found) hits.push(kw);
   }
-  // Fallback signal: the criterion LABEL itself may name the skill even when
-  // the user didn't add it as a keyword (e.g. label "QuickBooks experience").
-  // Only use distinctive label tokens (length > 4, not generic filler) so we
-  // don't create false positives on words like "experience" or "skills".
-  if (!hits.length && label) {
-    const GENERIC = new Set(['experience', 'skills', 'knowledge', 'proficiency', 'ability', 'strong', 'years', 'using', 'with', 'and', 'the', 'software', 'tools', 'tool', 'systems', 'system']);
-    for (const tok of normalizeForMatch(label).split(/[^a-z0-9]+/)) {
-      if (tok.length > 4 && !GENERIC.has(tok) && phraseInText(spaced, compact, tok)) { hits.push(tok); break; }
-    }
+  // Fallback ONLY when the criterion has no keywords at all: use the whole
+  // label as one phrase. (Matching individual label words caused false
+  // positives — e.g. "Other System" hitting any resume containing "other".)
+  if (!keywords.filter(Boolean).length && label) {
+    const phrase = normalizeForMatch(label);
+    if (phrase && phraseInText(spaced, compact, phrase)) hits.push(label);
   }
   return hits;
 }
