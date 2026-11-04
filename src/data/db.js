@@ -622,6 +622,8 @@ export const Candidates = {
       profileId: data.profileId || null,
       rawText: data.rawText || '',
       pdfUrl: data.pdfUrl || '',
+      fileUrl: data.fileUrl || '',
+      fileType: data.fileType || '',
       parsed: data.parsed || {},
       result: data.result || null,
       stage: startStage,                 // current pipeline stage id

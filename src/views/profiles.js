@@ -12,13 +12,124 @@ let listFilter = 'open';
 let listSearch = '';     // search box text
 let listCompany = '';    // company filter ('' = all)
 
+// arg: undefined → list · 'new' → blank editor · 'edit:<id>' → editor ·
+// '<id>' → read-only detail view.
 export function renderProfiles(navigate, selectedId) {
   if (selectedId === 'new') return renderEditor(navigate, null);
-  if (selectedId) {
-    const p = Profiles.get(selectedId);
+  if (typeof selectedId === 'string' && selectedId.startsWith('edit:')) {
+    const p = Profiles.get(selectedId.slice(5));
     if (p) return renderEditor(navigate, p);
+  } else if (selectedId) {
+    const p = Profiles.get(selectedId);
+    if (p) return renderDetail(navigate, p);
   }
   return renderList(navigate);
+}
+
+// Shared formatting helpers (list + detail view).
+const money = n => '$' + (Math.round((parseFloat(n) || 0) * 100) / 100).toLocaleString('en-US');
+const ownerName = p => { if (!p.ownerId) return '—'; const u = Users.all().find(x => x.id === p.ownerId); return u ? (u.name || u.username) : '—'; };
+
+// Read-only view of everything on a position (no edit mode needed).
+function renderDetail(navigate, p) {
+  const ws = Settings.workspace();
+  const staffing = (p.workspace || ws) !== 'internal';
+  const archived = p.status === 'archived';
+  const wrap = el('div');
+
+  wrap.appendChild(el('button', { class: 'btn btn-sm btn-ghost', style: 'margin-bottom:14px', onclick: () => navigate('profiles') }, '← Back to positions'));
+
+  const card = el('div', { class: 'card' });
+  const header = el('div', { class: 'card-header' });
+  const title = el('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap' });
+  title.innerHTML = `
+    <h2>${esc(p.role)}</h2>
+    <span class="badge ${archived ? 'badge-gray' : 'badge-green'}">${archived ? 'Archived' : 'Open'}</span>
+    ${p.priority === 'urgent' ? '<span class="badge badge-red">Urgent</span>' : ''}`;
+  header.appendChild(title);
+
+  const actions = el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' });
+  actions.appendChild(el('button', { class: 'btn btn-sm btn-primary', onclick: () => navigate('results', p.id) }, 'View results'));
+  actions.appendChild(el('button', { class: 'btn btn-sm', onclick: () => navigate('profiles', 'edit:' + p.id) }, 'Edit'));
+  if (archived) {
+    actions.appendChild(el('button', { class: 'btn btn-sm btn-ghost', onclick: () => { Profiles.reopen(p.id); navigate('profiles', p.id); } }, 'Reopen'));
+  } else {
+    actions.appendChild(el('button', { class: 'btn btn-sm btn-ghost', onclick: async () => {
+      const ok = await confirmDialog({
+        title: `Archive "${p.role}"?`,
+        message: 'It stays on record under Archived and can be reopened anytime.',
+        confirmText: 'Archive', cancelText: 'Keep open',
+      });
+      if (ok) { Profiles.archive(p.id); navigate('profiles', p.id); }
+    } }, 'Archive'));
+  }
+  header.appendChild(actions);
+  card.appendChild(header);
+
+  const field = (label, value, cls = '') => `
+    <div>
+      <div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">${esc(label)}</div>
+      <div class="${cls}">${value}</div>
+    </div>`;
+
+  const company = staffing ? (Companies.name(p.companyId) || '—') : (p.company || '—');
+  const timing = archived
+    ? field('Archived', esc(fmtDate(p.archivedAt)))
+    : field('Days open', esc(daysOpenLabel(p.openedAt || p.createdAt)));
+
+  const info = el('div', { class: 'grid grid-3', style: 'margin-bottom:16px' });
+  info.innerHTML = [
+    field(staffing ? 'Client' : 'Company', esc(company)),
+    field('Owner', esc(ownerName(p))),
+    field('Resumes', String(Candidates.byProfile(p.id).length)),
+    field('Minimum years', esc(String(p.minYears || 0))),
+    field('Interview threshold', `${esc(String(p.threshold != null ? p.threshold : 60))}%`),
+    timing,
+  ].join('');
+  card.appendChild(info);
+
+  if (staffing) {
+    const m = Profiles.margin(p);
+    const bill = parseFloat(p.billRate) || 0;
+    const comm = el('div', { class: 'grid grid-3', style: 'margin-bottom:16px' });
+    comm.innerHTML = [
+      field('Bill rate (USD/mo)', p.billRate ? money(p.billRate) : '—', 'mono'),
+      field('Pay budget', p.payBudget ? `${esc(String(p.payBudget))} ${esc(p.payCurrency || 'USD')}` : '—', 'mono'),
+      field('Est. monthly margin', (p.billRate || p.payBudget)
+        ? `${money(m)}${bill > 0 ? ` (${Math.round(m / bill * 100)}% GP)` : ''}`
+        : '—', `mono ${m >= 0 ? 'text-green' : 'text-red'}`),
+    ].join('');
+    card.appendChild(comm);
+  }
+
+  const sum = el('div', { class: 'explain' });
+  sum.innerHTML = `<strong>Summary:</strong> ${p.summary ? esc(p.summary) : '<span class="muted">No summary.</span>'}`;
+  card.appendChild(sum);
+  wrap.appendChild(card);
+
+  // Criteria (read-only).
+  const crit = p.criteria || [];
+  const critCard = el('div', { class: 'card' });
+  critCard.appendChild(el('div', { class: 'card-header' }, el('h2', {}, `Criteria (${crit.length})`)));
+  if (!crit.length) {
+    critCard.appendChild(el('div', { class: 'muted', style: 'padding:8px 0' }, 'No criteria defined for this position.'));
+  } else {
+    crit.forEach((c, i) => {
+      const row = el('div', { style: `padding:12px 0;${i ? 'border-top:1px solid var(--border)' : ''}` });
+      const kw = (c.keywords || []).map(k => `<span class="chip">${esc(k)}</span>`).join('');
+      row.innerHTML = `
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+          <strong>${esc(c.label || '(untitled)')}</strong>
+          <span class="badge badge-gray">${esc(c.kind || 'other')}</span>
+          <span class="badge badge-blue">Weight ${esc(String(c.weight || 1))}/5</span>
+          <span class="badge ${c.required ? 'badge-red' : 'badge-gray'}">${c.required ? 'Required' : 'Not required'}</span>
+        </div>
+        ${kw ? `<div class="chips">${kw}</div>` : '<div class="muted" style="font-size:12px">No keywords.</div>'}`;
+      critCard.appendChild(row);
+    });
+  }
+  wrap.appendChild(critCard);
+  return wrap;
 }
 
 function renderList(navigate) {
@@ -97,9 +208,7 @@ function renderList(navigate) {
     }
     const isArchived = listFilter === 'archived';
     const staffing = ws === 'staffing';
-    const money = n => '$' + (Math.round((parseFloat(n) || 0) * 100) / 100).toLocaleString('en-US');
     const table = el('table');
-    const ownerName = p => { if (!p.ownerId) return '—'; const u = Users.all().find(x => x.id === p.ownerId); return u ? (u.name || u.username) : '—'; };
     table.innerHTML = `<thead><tr>
       <th>Position</th>
       <th>${staffing ? 'Client' : 'Company'}</th>
@@ -115,7 +224,8 @@ function renderList(navigate) {
       const timing = isArchived ? fmtDate(p.archivedAt) : daysOpenLabel(p.openedAt || p.createdAt);
       const roleCell = `<strong>${esc(p.role)}</strong>${p.priority === 'urgent' ? ' <span class="badge badge-red">Urgent</span>' : ''}<div class="muted" style="font-size:12px">${esc(p.summary || '')}</div>`;
       const co = esc(companyName(p));
-      const tr = el('tr');
+      const tr = el('tr', { style: 'cursor:pointer', title: 'View position details' });
+      tr.addEventListener('click', () => navigate('profiles', p.id));
       const ownerCell = `<span class="muted">${esc(ownerName(p))}</span>`;
       if (staffing) {
         const m = Profiles.margin(p);
@@ -137,11 +247,13 @@ function renderList(navigate) {
           <td>${esc(timing)}</td>`;
       }
       const td = el('td', { style: 'white-space:nowrap' });
-      td.appendChild(el('button', { class: 'btn btn-sm', onclick: () => navigate('profiles', p.id) }, 'Edit'));
+      td.appendChild(el('button', { class: 'btn btn-sm', onclick: (e) => { e.stopPropagation(); navigate('results', p.id); } }, 'Results'));
+      td.appendChild(el('button', { class: 'btn btn-sm', style: 'margin-left:6px', onclick: (e) => { e.stopPropagation(); navigate('profiles', 'edit:' + p.id); } }, 'Edit'));
       if (isArchived) {
-        td.appendChild(el('button', { class: 'btn btn-sm btn-ghost', style: 'margin-left:6px', onclick: () => { Profiles.reopen(p.id); navigate('profiles'); } }, 'Reopen'));
+        td.appendChild(el('button', { class: 'btn btn-sm btn-ghost', style: 'margin-left:6px', onclick: (e) => { e.stopPropagation(); Profiles.reopen(p.id); navigate('profiles'); } }, 'Reopen'));
       } else {
-        td.appendChild(el('button', { class: 'btn btn-sm btn-ghost', style: 'margin-left:6px', onclick: async () => {
+        td.appendChild(el('button', { class: 'btn btn-sm btn-ghost', style: 'margin-left:6px', onclick: async (e) => {
+          e.stopPropagation();
           const ok = await confirmDialog({
             title: `Archive "${p.role}"?`,
             message: 'It stays on record under Archived and can be reopened anytime.',
@@ -184,7 +296,9 @@ function renderEditor(navigate, profile) {
   };
 
   const wrap = el('div');
-  const back = el('button', { class: 'btn btn-sm btn-ghost', style: 'margin-bottom:14px', onclick: () => navigate('profiles') }, '← Back to positions');
+  const back = isNew
+    ? el('button', { class: 'btn btn-sm btn-ghost', style: 'margin-bottom:14px', onclick: () => navigate('profiles') }, '← Back to positions')
+    : el('button', { class: 'btn btn-sm btn-ghost', style: 'margin-bottom:14px', onclick: () => navigate('profiles', profile.id) }, '← Back to position');
   wrap.appendChild(back);
 
   const card = el('div', { class: 'card' });
@@ -399,9 +513,8 @@ function renderEditor(navigate, profile) {
       payload.payCurrency = form.querySelector('#p-paycur').value;
       payload.priority = form.querySelector('#p-priority').value;
     }
-    if (isNew) Profiles.create(payload);
-    else Profiles.update(profile.id, payload);
-    navigate('profiles');
+    if (isNew) { Profiles.create(payload); navigate('profiles'); }
+    else { Profiles.update(profile.id, payload); navigate('profiles', profile.id); }
   } }, isNew ? 'Create Position' : 'Save Changes'));
   bar.appendChild(right);
 

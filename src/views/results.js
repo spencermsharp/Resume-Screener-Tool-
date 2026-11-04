@@ -51,6 +51,10 @@ export function renderResults(navigate, profileId) {
   // Company filter + position picker (shows company, title, candidate count).
   const companies = [...new Set(profiles.map(companyName))].sort();
   if (resultsCompany && !companies.includes(resultsCompany)) resultsCompany = '';
+  // A specific position was requested (e.g. from Job Positions) but the saved
+  // company filter would hide it: switch the filter to that position's company.
+  const requested = profileId && profiles.find(p => p.id === profileId);
+  if (requested && resultsCompany && companyName(requested) !== resultsCompany) resultsCompany = companyName(requested);
   const inCompany = resultsCompany ? profiles.filter(p => companyName(p) === resultsCompany) : profiles;
 
   const activeId = (profileId && inCompany.some(p => p.id === profileId))
@@ -547,6 +551,12 @@ export function renderCandidate(navigate, candId) {
     raw.appendChild(details);
   } else {
     rawHead.appendChild(el('h3', {}, 'Resume Text (as screened)'));
+    if (c.fileUrl) {
+      rawHead.appendChild(el('a', {
+        href: c.fileUrl, target: '_blank', rel: 'noopener',
+        class: 'btn btn-sm btn-ghost', style: 'margin-left:auto',
+      }, `Download original (.${c.fileType || 'docx'}) ↓`));
+    }
     raw.appendChild(rawHead);
     const pre = el('div', { class: 'explain', style: 'white-space:pre-wrap;max-height:360px;overflow:auto;border-left-color:var(--border)' });
     pre.textContent = c.rawText || '(no text captured)';

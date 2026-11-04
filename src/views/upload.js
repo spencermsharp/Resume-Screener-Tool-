@@ -1,24 +1,33 @@
 // ── UPLOAD & SCREEN VIEW ──────────────────────────────────────────────────────
 import { Profiles, Candidates, People, Blacklist, Settings, Stages, AIConfig } from '../data/db.js';
-import { extractText, lightStructure, nameFromFileName } from '../data/parser.js';
+import { extractText, lightStructure, nameFromFileName, resumeFileKind } from '../data/parser.js';
 import { screenCandidate } from '../data/screener.js';
 import { el, esc, scoreClass } from '../utils.js';
 
-// Store a resume PDF in Supabase Storage (bucket: 'resumes') via REST and return
-// a public URL for preview. If Supabase isn't configured, returns '' (text still
-// screens — preview is best-effort).
-async function storePdf(file) {
+const RESUME_CONTENT_TYPES = {
+  pdf: 'application/pdf',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  doc: 'application/msword',
+};
+
+// Store an original resume file (.pdf/.docx/.doc) in Supabase Storage (bucket:
+// 'resumes') via REST and return its public URL. If Supabase isn't configured
+// or the upload fails, returns '' (text still screens — storage is best-effort).
+async function storeResumeFile(file) {
+  const kind = resumeFileKind(file);
+  const contentType = RESUME_CONTENT_TYPES[kind];
+  if (!contentType) return '';
   const { getConfig, isConfigured } = await import('../auth/supabaseClient.js');
   if (!isConfigured()) return '';
   const { supabaseUrl, supabaseAnonKey } = getConfig();
-  const name = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.pdf`;
+  const name = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${kind}`;
   try {
     const r = await fetch(`${supabaseUrl}/storage/v1/object/resumes/${name}`, {
       method: 'POST',
       headers: {
         apikey: supabaseAnonKey,
         Authorization: `Bearer ${supabaseAnonKey}`,
-        'Content-Type': 'application/pdf',
+        'Content-Type': contentType,
       },
       body: file,
     });
@@ -57,10 +66,10 @@ export function renderUpload(navigate) {
       <div class="dropzone" id="dropzone">
         <div style="font-size:28px">📄</div>
         <div>Drag &amp; drop resumes here, or <strong>click to browse</strong></div>
-        <div class="tag-hint">PDF and .txt supported. Scanned/image-only PDFs may not have extractable text.</div>
+        <div class="tag-hint">PDF, Word (.docx, .doc) and .txt supported. Scanned/image-only PDFs may not have extractable text.</div>
       </div>
       <div class="tag-hint">Drop a folder (even with subfolders) and we'll pull every resume out of it.</div>
-      <input type="file" id="u-files" multiple accept=".txt,.pdf" style="display:none" />
+      <input type="file" id="u-files" multiple accept=".pdf,.docx,.doc,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword,text/plain" style="display:none" />
       <input type="file" id="u-folder" webkitdirectory directory multiple style="display:none" />
       <div style="margin-top:8px">
         <button type="button" class="btn btn-sm btn-ghost" id="u-browse-folder">📁 Browse a folder…</button>
@@ -108,11 +117,12 @@ export function renderUpload(navigate) {
   const folderInput = form.querySelector('#u-folder');
 
   // Only keep files we can actually screen; ignore hidden/system junk.
-  const SUPPORTED = /\.(txt|pdf)$/i;
+  const SUPPORTED = /\.(txt|pdf|docx|doc)$/i;
   function isSupported(f) {
     const n = f.name || '';
     if (n.startsWith('.')) return false;            // .DS_Store and friends
-    return SUPPORTED.test(n) || f.type === 'text/plain';
+    if (n.startsWith('~$')) return false;           // Word owner/lock files (not real resumes)
+    return SUPPORTED.test(n) || resumeFileKind(f) !== '';
   }
 
   function renderFiles() {
@@ -207,7 +217,7 @@ export function renderUpload(navigate) {
     const bits = [];
     if (added) bits.push(`Added ${added} file(s)`);
     if (ignored) bits.push(`ignored ${ignored} unsupported`);
-    hint.textContent = bits.length ? bits.join(', ') + '.' : 'No supported files found (looking for .txt / .pdf).';
+    hint.textContent = bits.length ? bits.join(', ') + '.' : 'No supported files found (looking for .pdf / .docx / .doc / .txt).';
   }
 
   dz.addEventListener('click', () => fileInput.click());
@@ -327,10 +337,15 @@ export function renderUpload(navigate) {
           const result = await screenCandidate(item.rawText, profile);
           const banned = item._banned || Blacklist.match({ name: item.name || struct.name, email: struct.email, phone: struct.phone });
           const startStage = banned ? 'out' : 'screened';
-          let pdfUrl = '';
-          const isPdfFile = item.file && (item.file.type === 'application/pdf' || /\.pdf$/i.test(item.file.name || ''));
-          if (isPdfFile) {
-            try { pdfUrl = await storePdf(item.file); } catch { /* preview is best-effort */ }
+          // Keep the original file. PDFs get pdfUrl (inline preview); Word files
+          // get fileUrl/fileType (download link).
+          let pdfUrl = '', fileUrl = '', fileType = '';
+          const kind = item.file ? resumeFileKind(item.file) : '';
+          if (kind === 'pdf') {
+            try { pdfUrl = await storeResumeFile(item.file); } catch { /* preview is best-effort */ }
+          } else if (kind === 'docx' || kind === 'doc') {
+            fileType = kind;
+            try { fileUrl = await storeResumeFile(item.file); } catch { /* storage is best-effort */ }
           }
 
           const cand = Candidates.create({
@@ -339,6 +354,8 @@ export function renderUpload(navigate) {
             profileId,
             rawText: item.rawText,
             pdfUrl,
+            fileUrl,
+            fileType,
             parsed: { ...struct, years: result.yearsFound },
             result,
             stage: startStage,
