@@ -2,6 +2,7 @@
 import { Profiles, Candidates, Settings, Stages, AIConfig } from '../data/db.js';
 import { el, esc } from '../utils.js';
 import { isAdmin, currentUser } from '../auth/auth.js';
+import { checkAIHealth } from '../data/screener.js';
 
 // Selected efficiency date range (session-scoped): '30'|'90'|'180'|'365'|'all'|'custom'.
 let dashRange = '90';
@@ -212,18 +213,46 @@ async function renderAIBanner(banner, navigate) {
   // admin can change it; everyone else just sees which engine is in use.
   const ai = await AIConfig.refresh();
   const admin = isAdmin();
+
+  // Check whether AI actually works when it's ON (everyone), or when it's OFF
+  // for admins only (so they know before turning it on).
+  let health = null;
+  if (ai.enabled || admin) {
+    banner.innerHTML = '';
+    banner.append(el('span', {}, 'Checking AI status…'));
+    health = await checkAIHealth();
+    if (!banner.isConnected) return;
+  }
+  const broken = ai.enabled && health && !health.ok;
+
   banner.innerHTML = '';
-  banner.className = `banner ${ai.enabled ? 'banner-info' : 'banner-warn'}`;
+  banner.className = `banner ${broken ? 'banner-error' : (ai.enabled ? 'banner-info' : 'banner-warn')}`;
   const msg = el('span');
   const scope = ' for <strong>everyone</strong>';
-  msg.innerHTML = ai.enabled
-    ? `🤖 AI screening is <strong>ON</strong>${scope} (Claude ${esc(ai.model || model)}). Falls back to rules on any error.`
-    : `📏 AI screening is <strong>OFF</strong>${scope} — resumes are scored with the rules engine.`;
+  if (broken) {
+    msg.innerHTML = `⚠️ AI screening is <strong>ON</strong> but <strong>NOT working</strong> — resumes are being scored with the rules engine. Reason: ${esc(health.reason)}`;
+  } else {
+    msg.innerHTML = ai.enabled
+      ? `🤖 AI screening is <strong>ON</strong>${scope} (Claude ${esc(ai.model || model)}). Falls back to rules on any error.`
+      : `📏 AI screening is <strong>OFF</strong>${scope} — resumes are scored with the rules engine.`;
+  }
+  if (!ai.enabled && admin && health && !health.ok) {
+    msg.innerHTML += ` <span class="muted">AI is not available yet: ${esc(health.reason)}</span>`;
+  }
   if (!admin) {
     msg.innerHTML += ' <span class="muted">Set by an admin.</span>';
     banner.append(msg);
     return;
   }
+  const recheck = el('button', {
+    class: 'btn btn-sm btn-ghost',
+    onclick: async () => {
+      banner.innerHTML = '';
+      banner.append(el('span', {}, 'Checking AI status…'));
+      await checkAIHealth({ force: true });
+      renderAIBanner(banner, navigate);
+    },
+  }, 'Re-check');
   const toggle = el('button', {
     class: `btn btn-sm ${ai.enabled ? '' : 'btn-primary'}`,
     style: 'margin-left:auto',
@@ -234,7 +263,7 @@ async function renderAIBanner(banner, navigate) {
       navigate('dashboard');
     },
   }, ai.enabled ? 'Turn AI off for everyone' : 'Turn AI on for everyone');
-  banner.append(msg, toggle);
+  banner.append(msg, toggle, recheck);
 }
 
 function kpi(label, value, sub, highlight) {

@@ -432,6 +432,15 @@ function renderRankedList(activeCands, outCands, profile, navigate) {
   return card;
 }
 
+// Which engine produced this score (AI, rules, or AI failed → rules).
+function engineBadge(r) {
+  const style = 'style="margin-top:4px"';
+  if (r.aiFallback) return `<span class="badge badge-red" ${style} title="${esc(r.aiError || 'AI request failed')}">AI failed → rules engine</span>`;
+  if (r.engine === 'ai') return `<span class="badge badge-blue" ${style}>Scored by AI (Claude)</span>`;
+  if (r.engine === 'rules') return `<span class="badge badge-gray" ${style}>Scored by rules engine</span>`;
+  return '';
+}
+
 // ── CANDIDATE DETAIL ──────────────────────────────────────────────────────────
 export function renderCandidate(navigate, candId) {
   const c = Candidates.get(candId);
@@ -452,6 +461,7 @@ export function renderCandidate(navigate, candId) {
     <div>
       <h2>${esc(c.name)}</h2>
       <div class="muted">${esc(profile?.role || '—')} · ${scoreLabel(r.score || 0)}</div>
+      ${engineBadge(r)}
     </div>
   `;
   header.appendChild(headerInfo);

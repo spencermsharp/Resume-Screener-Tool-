@@ -1,7 +1,7 @@
 // ── UPLOAD & SCREEN VIEW ──────────────────────────────────────────────────────
 import { Profiles, Candidates, People, Blacklist, Settings, Stages, AIConfig } from '../data/db.js';
 import { extractText, lightStructure, nameFromFileName, resumeFileKind } from '../data/parser.js';
-import { screenCandidate } from '../data/screener.js';
+import { screenCandidate, checkAIHealth } from '../data/screener.js';
 import { el, esc, scoreClass } from '../utils.js';
 
 const RESUME_CONTENT_TYPES = {
@@ -103,8 +103,18 @@ export function renderUpload(navigate) {
     ? '🤖 AI screening is ON (set by admin). Falls back to rules on any error.'
     : '📏 Rules engine (AI is off — an admin can turn it on from the Dashboard).';
   const hintEl = form.querySelector('#u-hint');
+  // When AI is ON, confirm it actually works; if not, warn in red (run still allowed).
+  const showEngine = async (ai, opts) => {
+    hintEl.style.color = '';
+    hintEl.textContent = engineHint(ai);
+    if (!ai.enabled) return;
+    const h = await checkAIHealth(opts);
+    if (!hintEl.isConnected || h.ok) return;
+    hintEl.style.color = 'var(--red)';
+    hintEl.textContent = `⚠️ AI is ON but not working (${h.reason}) — this run will use the rules engine.`;
+  };
   hintEl.textContent = engineHint(AIConfig.get());
-  AIConfig.refresh().then(ai => { if (hintEl.isConnected) hintEl.textContent = engineHint(ai); });
+  AIConfig.refresh().then(ai => { if (hintEl.isConnected) showEngine(ai); });
 
   const resultMount = el('div');
   wrap.appendChild(resultMount);
@@ -214,6 +224,7 @@ export function renderUpload(navigate) {
   function flashHint(added, ignored) {
     const hint = form.querySelector('#u-hint');
     if (!hint) return;
+    hint.style.color = '';
     const bits = [];
     if (added) bits.push(`Added ${added} file(s)`);
     if (ignored) bits.push(`ignored ${ignored} unsupported`);
@@ -246,7 +257,8 @@ export function renderUpload(navigate) {
     runBtn.textContent = '⏳ Screening…';
 
     // Use the admin's CURRENT AI setting for this run (fresh from Supabase).
-    await AIConfig.refresh();
+    const runAI = await AIConfig.refresh();
+    await showEngine(runAI);
 
     // Progress bar: total work = files to parse + (parsed items + pasted) to screen.
     // We don't know how many files parse successfully up front, so we advance
@@ -371,7 +383,7 @@ export function renderUpload(navigate) {
         paint();
       }
       label.textContent = 'Done';
-      renderResults(created, skipped, profile, navigate, resultMount, dedupe, duplicates);
+      renderResults(created, skipped, profile, navigate, resultMount, dedupe, duplicates, !!runAI.enabled);
     } catch (err) {
       resultMount.innerHTML = '';
       const card = el('div', { class: 'card' });
@@ -391,7 +403,7 @@ export function renderUpload(navigate) {
   return wrap;
 }
 
-function renderResults(created, skipped, profile, navigate, mount, dedupe, duplicates) {
+function renderResults(created, skipped, profile, navigate, mount, dedupe, duplicates, aiEnabled) {
   mount.innerHTML = '';
   const card = el('div', { class: 'card' });
   card.appendChild(el('div', { class: 'card-header' }, el('h2', {}, 'Screening Complete')));
@@ -427,6 +439,16 @@ function renderResults(created, skipped, profile, navigate, mount, dedupe, dupli
   }
 
   card.appendChild(el('div', { class: 'banner banner-info' }, `✅ Screened ${created.length} candidate(s) against "${profile.role}".`));
+
+  // Which engine actually scored this run — make any AI fallback impossible to miss.
+  const fellBack = created.filter(c => c.result && c.result.aiFallback);
+  if (fellBack.length) {
+    const b = el('div', { class: 'banner banner-error' });
+    b.innerHTML = `⚠️ AI failed for ${fellBack.length} of ${created.length} resume(s); they were scored with the rules engine instead. Reason: ${esc(fellBack[0].result.aiError || 'unknown')}`;
+    card.appendChild(b);
+  } else if (aiEnabled && created.some(c => c.result && c.result.engine === 'ai')) {
+    card.appendChild(el('div', { class: 'muted', style: 'font-size:12px;margin-bottom:12px' }, '🤖 Scored by AI (Claude).'));
+  }
   mount.appendChild(card);
 
   // ── AI TRIAGE: auto-sort into Clear yes / Borderline / Clear no ───────────

@@ -359,7 +359,9 @@ export async function screenWithAI(resumeText, profile) {
     body: JSON.stringify(body),
   });
   if (!resp.ok) {
-    let msg = `AI request returned ${resp.status}`;
+    let msg = resp.status === 404
+      ? 'The AI function (screen) is not deployed in Supabase.'
+      : `AI request returned ${resp.status}`;
     try { const j = await resp.json(); if (j.error) msg = j.error; } catch { /* ignore */ }
     throw new Error(msg);
   }
@@ -371,15 +373,69 @@ export async function screenWithAI(resumeText, profile) {
 }
 
 /**
+ * AI HEALTH CHECK — asks the 'screen' function whether AI can actually run
+ * (function deployed, key set, Anthropic accepts the key). Returns
+ * { ok:boolean, reason:string }. Cached in memory for 5 minutes; a real
+ * screening failure overwrites the cache so the UI reflects it right away.
+ */
+const HEALTH_TTL_MS = 5 * 60 * 1000;
+let _health = null;   // { ok, reason, at }
+
+function setHealth(ok, reason) {
+  _health = { ok, reason: reason || '', at: Date.now() };
+  return { ok: _health.ok, reason: _health.reason };
+}
+
+export async function checkAIHealth({ force = false } = {}) {
+  if (!force && _health && Date.now() - _health.at < HEALTH_TTL_MS) {
+    return { ok: _health.ok, reason: _health.reason };
+  }
+  const { getConfig, isConfigured } = await import('../auth/supabaseClient.js');
+  if (!isConfigured()) return setHealth(false, 'Supabase is not configured.');
+  const { supabaseUrl, supabaseAnonKey } = getConfig();
+  let resp;
+  try {
+    resp = await fetch(`${supabaseUrl}/functions/v1/screen`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: supabaseAnonKey,
+        Authorization: `Bearer ${supabaseAnonKey}`,
+      },
+      body: JSON.stringify({ health: true }),
+    });
+  } catch {
+    return setHealth(false, 'Could not reach the AI service.');
+  }
+  if (resp.status === 404) return setHealth(false, 'The AI function (screen) is not deployed in Supabase.');
+  let data = null;
+  try { data = await resp.json(); } catch { /* non-JSON */ }
+  if (!resp.ok || !data || typeof data.ok !== 'boolean') {
+    const detail = data && (data.reason || data.error || data.message);
+    return setHealth(false, `AI service returned ${resp.status}${detail ? `: ${detail}` : ''}`);
+  }
+  return setHealth(data.ok, data.ok ? '' : (data.reason || 'AI is not available.'));
+}
+
+/**
  * PUBLIC ENTRY — the app calls this; it chooses the engine.
  * The engine is decided by the SHARED, admin-controlled AI setting, so every
- * user screens the same way.
+ * user screens the same way. If AI is on but fails, the rules result is
+ * returned flagged with aiFallback/aiError so the UI can show it.
  */
 export async function screenCandidate(resumeText, profile) {
   const ai = AIConfig.get();
   if (ai.enabled) {
-    try { return await screenWithAI(resumeText, profile); }
-    catch (e) { console.warn('AI screen failed, falling back to rules:', e.message); }
+    try {
+      const res = await screenWithAI(resumeText, profile);
+      if (_health && !_health.ok) _health = null; // AI works again; re-check next time
+      return res;
+    } catch (e) {
+      const aiError = String((e && e.message) || e || 'AI request failed').slice(0, 300);
+      console.warn('AI screen failed, falling back to rules:', aiError);
+      setHealth(false, aiError);
+      return { ...screenRuleBased(resumeText, profile), aiFallback: true, aiError };
+    }
   }
   return screenRuleBased(resumeText, profile);
 }
