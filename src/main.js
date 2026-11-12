@@ -1,5 +1,5 @@
 // ── APP SHELL — Kruew + Vimenture/Qualis Hiring Platform ─────────────────────
-import { initDB, initCloudSync, syncNow, forceResync, onSyncStatus, getSyncStatus, Settings, WORKSPACES } from './data/db.js';
+import { initDB, initCloudSync, syncNow, forceResync, retryFailedWrites, onSyncStatus, getSyncStatus, Settings, WORKSPACES } from './data/db.js';
 import { el } from './utils.js';
 import { renderDashboard } from './views/dashboard.js';
 import { renderProfiles } from './views/profiles.js';
@@ -84,6 +84,9 @@ function activeTabFor(route) {
 }
 
 // Paint the sync status chip in place (no full re-render — never disruptive).
+// Failures win over everything else: writes the server rejected (dead-letter),
+// writes that keep failing, and writes that couldn't even be queued.
+const CHIP_HELP = 'Click: sync now · Double-click: force full re-sync';
 function paintSyncChip(chip, st) {
   const map = {
     synced:  ['✓ Synced', 'sc-ok'],
@@ -93,9 +96,49 @@ function paintSyncChip(chip, st) {
     error:   ['⚠ Sync error', 'sc-err'],
     local:   ['Local only', 'sc-off'],
   };
-  const [label, cls] = map[st.status] || map.local;
+  let [label, cls] = map[st.status] || map.local;
+  const lines = [];
+  const opLine = o => `• ${o.label || o.table}${o.status ? ` (HTTP ${o.status})` : ''}${o.lastError ? `: ${o.lastError.slice(0, 160)}` : ''}`;
+  if (st.writeError) lines.push(st.writeError);
+  else if (st.status === 'error' && st.error) lines.push(st.error);
+  if (st.deadLetter > 0) {
+    label = `⚠ ${st.deadLetter} failed to save`; cls = 'sc-err';
+    lines.push(`${st.deadLetter} change(s) were rejected by the server and are NOT saved:`, ...(st.deadLetterOps || []).slice(0, 8).map(opLine));
+  } else if (st.failing > 0) {
+    label = `⚠ ${st.failing} not saving`; cls = 'sc-err';
+    lines.push(`${st.failing} change(s) keep failing to upload (still retrying):`, ...(st.failingOps || []).slice(0, 8).map(opLine));
+  }
+  if (st.writeError && st.deadLetter === 0 && !st.failing) { label = '⚠ Changes not saved'; cls = 'sc-err'; }
+  const failed = st.deadLetter > 0 || !!st.writeError;
+  lines.push(failed ? 'Click: retry failed changes · Double-click: force full re-sync' : CHIP_HELP);
   chip.className = `sync-chip ${cls}`;
   chip.textContent = label;
+  chip.title = lines.join('\n');
+}
+
+// Re-render the current view after a background pull brought in new data —
+// but never while the user is typing, has a modal open, or is mid-upload.
+// A skipped refresh is retried after the next pull.
+let refreshPending = false;
+function userIsBusy() {
+  if (current === 'upload') return true;
+  if (document.querySelector('.modal-overlay.is-open')) return true;
+  const a = document.activeElement;
+  if (a && a.matches && a.matches('input, textarea, select, [contenteditable="true"]')) return true;
+  // Typed text that hasn't been saved yet (field no longer focused).
+  for (const f of app.querySelectorAll('input, textarea')) {
+    if (f.type === 'checkbox' || f.type === 'radio' || f.type === 'file') continue;
+    if (f.value !== f.defaultValue) return true;
+  }
+  return false;
+}
+function onBackgroundPull({ changed } = {}) {
+  if (changed) refreshPending = true;
+  if (!refreshPending || needsLogin() || userIsBusy()) return;
+  refreshPending = false;
+  const y = window.scrollY;
+  render(currentArg);
+  window.scrollTo(0, y);
 }
 
 function render(arg) {
@@ -109,7 +152,7 @@ function render(arg) {
       app.innerHTML = '<div class="main-content"><div class="card"><p class="muted">Loading latest data…</p></div></div>';
       try { await forceResync(); } catch (e) { console.warn('Post-login sync failed:', e); }
       render();
-      initCloudSync(() => {}).catch(() => {});
+      // Background sync was already started once at boot.
     }));
     return;
   }
@@ -157,7 +200,10 @@ function render(arg) {
   // Sync status chip. Click = sync now. Double-click = force full re-sync from
   // Supabase (wipes local cache + re-pulls) — fixes an out-of-sync device.
   if (isConfigured()) {
-    const chip = el('button', { class: 'sync-chip', id: 'sync-chip', title: 'Click: sync now · Double-click: force full re-sync', onclick: () => syncNow() });
+    const chip = el('button', {
+      class: 'sync-chip', id: 'sync-chip', title: CHIP_HELP,
+      onclick: () => { const st = getSyncStatus(); (st.deadLetter > 0 || st.writeError) ? retryFailedWrites() : syncNow(); },
+    });
     chip.addEventListener('dblclick', async () => { await forceResync(); render(); });
     paintSyncChip(chip, getSyncStatus());
     right.appendChild(chip);
@@ -231,8 +277,9 @@ if (typeof window !== 'undefined') window.forceResync = async () => { const n = 
   } catch (e) { console.warn('Initial sync failed, rendering from cache:', e); }
   render();
 
-  // Then keep syncing in the background. Periodic pulls refresh the cache but do
-  // NOT re-render (so you're never interrupted) — fresh data shows on next nav.
-  initCloudSync(() => { /* background refresh only; no auto re-render */ })
+  // Then keep syncing in the background (started ONCE, here). When a pull
+  // brings in other users' changes, the current view re-renders unless the
+  // user is busy typing / in a modal / uploading.
+  initCloudSync(onBackgroundPull)
     .catch(e => console.warn('Cloud sync init failed:', e));
 })();

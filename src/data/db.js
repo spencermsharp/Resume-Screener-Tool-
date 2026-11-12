@@ -17,6 +17,7 @@
 
 import { uid, today } from '../utils.js';
 import { lightStructure, nameFromFileName } from './parser.js';
+import { loadConfig, isConfigured } from '../auth/supabaseClient.js';
 
 const KEYS = {
   profiles: 'qrs_profiles',
@@ -66,23 +67,64 @@ let _wq = null, _rest = null;
 async function wq() { if (!_wq) _wq = await import('./writeQueue.js'); return _wq; }
 async function rest() { if (!_rest) _rest = await import('./sbRest.js'); return _rest; }
 
-// ── STORAGE BACKEND (localStorage cache + write-through to Supabase) ──────────
+// ── STORAGE BACKEND ───────────────────────────────────────────────────────────
+// LOCAL mode (no Supabase): localStorage IS the data.
+// CLOUD mode (Supabase configured): the synced keys live ONLY in memory. The
+// server is the source of truth and the app pulls before its first render, so
+// there's no reason to keep a multi-MB copy in localStorage (it was hitting the
+// ~5 MB browser quota). Non-synced keys (settings, flags) stay in localStorage.
+// Memory holds JSON strings so read() always returns a fresh copy, exactly like
+// localStorage did — callers mutate what they read before writing it back.
+const _mem = {};
+let _cloud = null;            // decided once, on first use (see isCloud)
+const _loaded = new Set();    // cloud: synced keys filled by a successful pull
+let _writeError = null;       // cloud: last failure to queue a write (e.g. quota)
+
+// window.APP_CONFIG is set by public/config.js, a classic script that runs
+// before this module, so the config can be read synchronously at import time.
+function isCloud() {
+  if (_cloud == null) { loadConfig(); _cloud = isConfigured(); }
+  return _cloud;
+}
+
+function isQuotaError(e) {
+  return !!e && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22 || e.code === 1014);
+}
+
 const backend = {
-  read(key) { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } },
+  read(key) {
+    try {
+      const raw = (isCloud() && SYNC[key]) ? _mem[key] : localStorage.getItem(key);
+      return raw == null ? null : JSON.parse(raw);
+    } catch { return null; }
+  },
+
+  // Store a value WITHOUT queueing a sync (used for server-confirmed data).
+  put(key, value) {
+    if (isCloud() && SYNC[key]) { if (value == null) delete _mem[key]; else _mem[key] = JSON.stringify(value); return; }
+    if (value == null) localStorage.removeItem(key); else localStorage.setItem(key, JSON.stringify(value));
+  },
 
   write(key, value) {
+    // Cloud: refuse to touch shared data before the server copy has loaded, so a
+    // write can never upload defaults or a partial list over the real data.
+    if (isCloud() && SYNC[key] && !_loaded.has(key)) {
+      throw new Error('Data is still loading from the server, so this change was not saved. Please try again in a moment.');
+    }
     const prev = this.read(key);
-    localStorage.setItem(key, JSON.stringify(value));
+    this.put(key, value);
     // Fire-and-forget sync so the UI stays instant (durable queue handles retries).
     this._sync(key, value, prev);
   },
 
   // Diff the new value against the previous and enqueue minimal Supabase writes.
+  // Once the queue module is loaded this runs synchronously up to the enqueue,
+  // so a pull can't land between the cache update and the queued op.
   async _sync(key, value, prev) {
     const cfg = SYNC[key];
     if (!cfg) return;
     try {
-      const { enqueueUpsert, enqueueDelete } = await wq();
+      const { enqueueUpsert, enqueueDelete } = _wq || await wq();
       if (cfg.kind === 'kv') {
         enqueueUpsert('app_kv', [{ key: cfg.kvKey, value, updated_at: new Date().toISOString() }], `kv:${cfg.kvKey}`);
         setSyncStatus({ status: 'syncing' });
@@ -99,8 +141,7 @@ const backend = {
       for (const item of list) {
         const before = prevById[String(item.id)];
         if (!before || JSON.stringify(before) !== JSON.stringify(item)) {
-          // Record a local revision time so the pull can do per-record
-          // last-write-wins and never overwrite a fresher local edit.
+          // Record a local revision time on the changed record.
           item._rev = stamp;
           changed.push({ id: String(item.id), data: item, updated_at: stamp });
         }
@@ -108,7 +149,7 @@ const backend = {
       let touched = false;
       if (changed.length) {
         // Persist the _rev stamps we just set back into the local cache.
-        localStorage.setItem(key, JSON.stringify(list));
+        this.put(key, list);
         enqueueUpsert(cfg.table, changed, cfg.table);
         touched = true;
       }
@@ -116,64 +157,116 @@ const backend = {
         if (!nextIds.has(String(old.id))) { enqueueDelete(cfg.table, String(old.id), 'id', cfg.table); touched = true; }
       }
       if (touched) setSyncStatus({ status: 'syncing' });
-    } catch (e) { console.warn('[sync] enqueue failed', e); }
+    } catch (e) {
+      // Surface it: a write that couldn't be queued will never reach the server.
+      console.error('[sync] enqueue failed', e);
+      _writeError = {
+        message: isQuotaError(e)
+          ? 'Browser storage is full, so a change could not be queued for upload.'
+          : `A change could not be queued for upload: ${e && e.message || e}`,
+        at: new Date().toISOString(),
+      };
+      setSyncStatus({ status: 'error', error: _writeError.message, writeError: _writeError.message });
+    }
   },
 
-  // Pull all tables from Supabase into the local cache on boot. Protects any
-  // records that still have pending (un-synced) local writes.
+  // Pull every synced table from Supabase into the cache. The server is the
+  // source of truth, with one exception: anything still waiting to upload (queue
+  // or dead-letter) is overlaid from the queued op itself, so a pending edit is
+  // never reverted and a pending delete never comes back.
+  // Returns { ok, changed, reachable, empty }:
+  //   ok        every table fetched (a missing table counts as fetched)
+  //   changed   server data differs from the previous pull
+  //   reachable tables that answered with rows (not missing, not failed)
+  //   empty     reachable tables that returned zero rows
   async pullAll() {
     const r = await rest();
-    const { pendingRecordIds } = await wq();
-    const pend = pendingRecordIds();
-    let ok = true;   // false if any table failed to fetch (so status shows a problem)
+    const W = await wq();
+    let ok = true, changed = false;
+    const reachable = new Set(), empty = new Set();
+
+    // 1) Fetch everything first (app_kv once for all kv keys).
+    const kvRows = await r.sbSelect('app_kv');
+    const fetched = {};
     for (const [lsKey, cfg] of Object.entries(SYNC)) {
-      if (cfg.kind === 'kv') {
-        const rows = await r.sbSelect('app_kv');
-        if (rows === r.TABLE_MISSING) continue;            // table not created yet — skip quietly
-        if (rows == null) { ok = false; continue; }
-        const row = rows.find(x => x.key === cfg.kvKey);
-        if (row && row.value != null) {
-          localStorage.setItem(lsKey, JSON.stringify(row.value));
-        } else {
-          // No server row yet — push local up so it exists for other devices.
-          const localVal = this.read(lsKey);
-          if (localVal != null) {
-            const { enqueueUpsert } = await wq();
-            enqueueUpsert('app_kv', [{ key: cfg.kvKey, value: localVal, updated_at: new Date().toISOString() }], `kv:${cfg.kvKey}`);
-          }
-        }
-        continue;
-      }
-      const rows = await r.sbSelect(cfg.table);
-      if (rows === r.TABLE_MISSING) continue;            // table not created yet — skip quietly
-      if (rows == null) { ok = false; continue; }        // fetch FAILED — keep cache, mark not-ok
-
-      // SUPABASE IS THE ONLY SOURCE OF TRUTH. The cache is an exact mirror of the
-      // server — no merge, no "local wins". The ONLY exception: a record with an
-      // in-flight pending write (not yet uploaded) is preserved so you don't lose
-      // the change you just made before it syncs. Everything else = server.
-      const p = pend[cfg.table] || { upsert: new Set(), del: new Set() };
-      const serverItems = rows.map(x => x.data).filter(Boolean);
-      const serverIds = new Set(serverItems.map(x => String(x.id)));
-
-      // First-run migration: server empty + we have un-synced local rows → push up.
-      const localList = this.read(lsKey) || [];
-      if (rows.length === 0 && localList.length && p.upsert.size === 0 && this._migrated !== lsKey) {
-        // Only migrate once per key to avoid loops; mark it.
-        const { enqueueUpsert } = await wq();
-        enqueueUpsert(cfg.table, localList.map(x => ({ id: String(x.id), data: x, updated_at: new Date().toISOString() })), cfg.table);
-      }
-
-      // Mirror = server rows, plus any pending-upsert local rows not yet on server.
-      const mirror = serverItems.slice();
-      if (p.upsert.size) {
-        const localById = {}; localList.forEach(x => { localById[String(x.id)] = x; });
-        p.upsert.forEach(id => { if (localById[id] && !serverIds.has(id)) mirror.push(localById[id]); });
-      }
-      localStorage.setItem(lsKey, JSON.stringify(mirror));
+      if (cfg.kind === 'collection') fetched[lsKey] = await r.sbSelect(cfg.table);
     }
-    return ok;
+
+    // 2) Snapshot pending work AFTER the fetch, so edits made while the
+    //    download was in flight are included. No awaits from here on.
+    const overlay = {};   // table -> Map(id -> data | DELETED)
+    const DELETED = Symbol('deleted');
+    for (const op of W.pendingOps()) {
+      if (!op.table) continue;
+      const m = overlay[op.table] || (overlay[op.table] = new Map());
+      if (op.type === 'upsert') {
+        for (const row of op.rows || []) {
+          if (!row) continue;
+          if (op.table === 'app_kv') { if (row.key != null) m.set(String(row.key), row.value); }
+          else if (row.id != null && row.data) m.set(String(row.id), row.data);
+        }
+      } else if (op.type === 'delete' && op.id != null) m.set(String(op.id), DELETED);
+    }
+
+    const sigOf = rows => {
+      let max = '';
+      for (const x of rows) if (x && x.updated_at && x.updated_at > max) max = x.updated_at;
+      return `${rows.length}|${max}`;
+    };
+    const markSig = (k, sig) => { if (this._sigs[k] !== undefined && this._sigs[k] !== sig) changed = true; this._sigs[k] = sig; };
+
+    // 3) Collections.
+    for (const [lsKey, cfg] of Object.entries(SYNC)) {
+      if (cfg.kind !== 'collection') continue;
+      const rows = fetched[lsKey];
+      if (rows == null) { ok = false; continue; }        // fetch FAILED: keep cache, mark not-ok
+      const ov = overlay[cfg.table];
+      let base;
+      if (rows === r.TABLE_MISSING) {
+        // Table not created yet: keep what this session has (nothing pulls it).
+        base = this.read(lsKey) || [];
+      } else {
+        reachable.add(cfg.table);
+        if (!rows.length) empty.add(cfg.table);
+        base = rows.map(x => x.data).filter(Boolean);
+        markSig(lsKey, sigOf(rows));
+      }
+      let mirror = base;
+      if (ov && ov.size) {
+        const seen = new Set();
+        mirror = [];
+        for (const item of base) {
+          const id = String(item.id);
+          seen.add(id);
+          if (!ov.has(id)) mirror.push(item);
+          else if (ov.get(id) !== DELETED) mirror.push(ov.get(id));
+        }
+        // Pending records the server doesn't have yet (new) go on top.
+        const added = [];
+        ov.forEach((data, id) => { if (data !== DELETED && !seen.has(id)) added.push(data); });
+        mirror = added.reverse().concat(mirror);
+      }
+      this.put(lsKey, mirror);
+      _loaded.add(lsKey);
+    }
+
+    // 4) Key/value rows (stages, ai_config) from the single app_kv fetch.
+    if (kvRows == null) ok = false;
+    else if (kvRows !== r.TABLE_MISSING) {
+      reachable.add('app_kv');
+      const kvOv = overlay.app_kv;
+      for (const [lsKey, cfg] of Object.entries(SYNC)) {
+        if (cfg.kind !== 'kv') continue;
+        const row = kvRows.find(x => x.key === cfg.kvKey);
+        markSig(lsKey, row ? String(row.updated_at || JSON.stringify(row.value)) : '-');
+        if (kvOv && kvOv.has(cfg.kvKey)) this.put(lsKey, kvOv.get(cfg.kvKey));   // pending local value wins
+        else this.put(lsKey, row && row.value != null ? row.value : null);       // null = use defaults
+        _loaded.add(lsKey);
+      }
+    }
+    return { ok, changed, reachable, empty };
   },
+  _sigs: {},
 };
 
 /**
@@ -379,7 +472,7 @@ async function maybeRescoreRules(afterPull = false) {
       // Mirror the confirmed server write into the local cache (no re-queue).
       const fresh = backend.read(KEYS.candidates) || [];
       fresh.forEach(c => { const r = rows.find(x => x.id === String(c.id)); if (r) c.result = r.data.result; });
-      localStorage.setItem(KEYS.candidates, JSON.stringify(fresh));
+      backend.put(KEYS.candidates, fresh);
       done += rows.length;
     }
     localStorage.setItem(RESCORE_FLAG, String(Date.now()));
@@ -392,62 +485,54 @@ async function maybeRescoreRules(afterPull = false) {
 }
 
 // ── INIT ───────────────────────────────────────────────────────────────────
-export function initDB() {
-  if (backend.read(KEYS.profiles) == null) backend.write(KEYS.profiles, SEED_PROFILES);
-  if (backend.read(KEYS.candidates) == null) backend.write(KEYS.candidates, []);
-  if (backend.read(KEYS.settings) == null) backend.write(KEYS.settings, DEFAULT_SETTINGS);
-  if (backend.read(KEYS.stages) == null) backend.write(KEYS.stages, DEFAULT_STAGES);
-
+// Data migrations. Each one writes ONLY if it actually changed something. Local
+// mode runs them at boot; cloud mode runs them once per session after the first
+// successful server pull, so they only ever see (and upload) real server data.
+// Returns a list of what changed, for the console log.
+function runDataMigrations() {
+  const did = [];
   // Migrate legacy candidates (old `status` field) to the stage pipeline.
   const cands = backend.read(KEYS.candidates) || [];
-  let migrated = false;
+  const legacyIds = [];
   const legacyMap = { screened: 'screened', shortlisted: 'hr', rejected: 'rejected' };
   for (const c of cands) {
+    let hit = false;
     if (!c.stage) {
       c.stage = legacyMap[c.status] || 'screened';
       c.stageHistory = c.stageHistory || [{ stage: c.stage, at: new Date().toISOString(), note: 'Imported from earlier version.' }];
-      migrated = true;
+      hit = true;
     }
     // Retire the removed "Will Not Interview" stage → fold into Rejected.
-    if (c.stage === 'no_interview') { c.stage = 'rejected'; migrated = true; }
+    if (c.stage === 'no_interview') { c.stage = 'rejected'; hit = true; }
+    if (hit) legacyIds.push(c.id);
   }
-  if (migrated) backend.write(KEYS.candidates, cands);
-
-  // One-time name backfill (filename → real name). In cloud mode the real data
-  // arrives after the first server pull, so this is also invoked from
-  // forceResync()/pull — the flag guard makes it run exactly once, whenever the
-  // candidate data is actually present.
-  maybeBackfillNames();
-  // One-time rules re-score. Local-only mode runs here; in cloud mode it waits
-  // for the post-pull call (it self-checks), so stale cache is never uploaded.
-  maybeRescoreRules(false);
+  if (legacyIds.length) { backend.write(KEYS.candidates, cands); did.push(`legacy stage: ${legacyIds.join(', ')}`); }
 
   // Drop the retired stage from any saved stages list.
   const savedStages = backend.read(KEYS.stages);
   if (Array.isArray(savedStages) && savedStages.some(s => s.id === 'no_interview')) {
     backend.write(KEYS.stages, savedStages.filter(s => s.id !== 'no_interview'));
+    did.push('stages: removed no_interview');
   }
 
   // Backfill threshold + workspace/company on older profiles that predate them.
   const profs = backend.read(KEYS.profiles) || [];
-  let pMigrated = false;
+  const profIds = [];
   for (const p of profs) {
-    if (p.threshold == null) { p.threshold = 60; pMigrated = true; }
-    if (p.workspace == null) { p.workspace = 'internal'; pMigrated = true; }
-    if (p.company == null) { p.company = p.workspace === 'internal' ? 'Vimenture' : ''; pMigrated = true; }
+    let hit = false;
+    if (p.threshold == null) { p.threshold = 60; hit = true; }
+    if (p.workspace == null) { p.workspace = 'internal'; hit = true; }
+    if (p.company == null) { p.company = p.workspace === 'internal' ? 'Vimenture' : ''; hit = true; }
+    if (hit) profIds.push(p.id);
   }
-  if (pMigrated) backend.write(KEYS.profiles, profs);
-
-  if (backend.read(KEYS.blacklist) == null) backend.write(KEYS.blacklist, []);
-  if (backend.read(KEYS.companies) == null) backend.write(KEYS.companies, []);
-  if (backend.read(KEYS.placements) == null) backend.write(KEYS.placements, []);
-  if (backend.read(KEYS.people) == null) backend.write(KEYS.people, []);
+  if (profIds.length) { backend.write(KEYS.profiles, profs); did.push(`profile backfill: ${profIds.join(', ')}`); }
 
   // Migrate: ensure every candidate (application) is linked to a global Person.
   // Match existing people by email, else by name, else create a new Person.
   const allCands = backend.read(KEYS.candidates) || [];
   let people = backend.read(KEYS.people) || [];
-  let peopleChanged = false, candsChanged = false;
+  let peopleChanged = false;
+  const linked = [];
   const findPerson = (name, email) => {
     const e = normEmail(email), n = normName(name);
     if (e) return people.find(p => normEmail(p.email) === e) || null;
@@ -469,10 +554,54 @@ export function initDB() {
       peopleChanged = true;
     }
     c.personId = person.id;
-    candsChanged = true;
+    linked.push(c.id);
   }
   if (peopleChanged) backend.write(KEYS.people, people);
-  if (candsChanged) backend.write(KEYS.candidates, allCands);
+  if (linked.length) { backend.write(KEYS.candidates, allCands); did.push(`person link: ${linked.join(', ')}`); }
+  return did;
+}
+
+export function initDB() {
+  // Settings are per-device UI state (never synced) and live in localStorage in both modes.
+  if (backend.read(KEYS.settings) == null) backend.write(KEYS.settings, DEFAULT_SETTINGS);
+
+  if (isCloud()) {
+    // Cloud mode: write NOTHING shared before the first successful pull (no
+    // seed position, no default stages, no migrations). Free the quota held by
+    // the old localStorage cache: only these synced cache keys are removed —
+    // the write queue, dead-letter, settings, session and one-time flags stay.
+    for (const k of Object.keys(SYNC)) { try { localStorage.removeItem(k); } catch {} }
+    return;
+  }
+
+  // Local-only mode: localStorage is the data, so seed + migrate right here.
+  if (backend.read(KEYS.profiles) == null) backend.write(KEYS.profiles, SEED_PROFILES);
+  if (backend.read(KEYS.candidates) == null) backend.write(KEYS.candidates, []);
+  if (backend.read(KEYS.stages) == null) backend.write(KEYS.stages, DEFAULT_STAGES);
+  if (backend.read(KEYS.blacklist) == null) backend.write(KEYS.blacklist, []);
+  if (backend.read(KEYS.companies) == null) backend.write(KEYS.companies, []);
+  if (backend.read(KEYS.placements) == null) backend.write(KEYS.placements, []);
+  if (backend.read(KEYS.people) == null) backend.write(KEYS.people, []);
+  runDataMigrations();
+  // The one-time name backfill and rules re-score have already run against
+  // production. They are no longer called: their done-flags are per-device,
+  // so every new browser would otherwise re-run them and silently rewrite
+  // shared data.
+}
+
+// Cloud: one-time work after the first successful pull of this session.
+let _postPullDone = false;
+function afterFirstPull(res) {
+  if (_postPullDone) return;
+  _postPullDone = true;
+  const did = runDataMigrations();
+  if (did.length) console.log('[migrate] uploaded changes:', did);
+  // Seed the sample position only if the server genuinely has no positions
+  // (and nothing is pending for that table).
+  if (res.empty.has('positions') && !Profiles.all().length) {
+    backend.write(KEYS.profiles, JSON.parse(JSON.stringify(SEED_PROFILES)));
+    console.log('[seed] server had no positions — seeded', SEED_PROFILES[0].id);
+  }
 }
 
 // ── PROFILES REPOSITORY (role definitions — data, not code) ───────────────────
@@ -750,86 +879,115 @@ export const Stages = {
   reset() { return this.save(JSON.parse(JSON.stringify(DEFAULT_STAGES))); },
 };
 
-// ── CLOUD SYNC BOOTSTRAP ──────────────────────────────────────────────────────
-// Call once after initDB(). Pulls shared data from Supabase into the local cache,
-// starts the durable write-queue worker, and polls periodically so other devices'
-// changes appear. Safe no-op when Supabase isn't configured.
 // ── SYNC STATUS (observable) ──────────────────────────────────────────────────
-// status: 'synced' | 'syncing' | 'pending' | 'offline' | 'error' | 'local'
-const _syncState = { status: 'local', pending: 0, lastSync: null };
+// status: 'synced' | 'syncing' | 'pending' | 'failed' | 'offline' | 'error' | 'local'
+const _syncState = { status: 'local', pending: 0, failing: 0, deadLetter: 0, failingOps: [], deadLetterOps: [], writeError: null, error: null, lastSync: null };
 const _syncListeners = new Set();
 export function onSyncStatus(fn) { _syncListeners.add(fn); fn(_syncState); return () => _syncListeners.delete(fn); }
 export function getSyncStatus() { return { ..._syncState }; }
 function setSyncStatus(patch) { Object.assign(_syncState, patch); _syncListeners.forEach(fn => { try { fn(_syncState); } catch {} }); }
 
-let _syncing = false;
+let _cycleP = null;        // in-flight sync cycle (push + pull)
+let _lastPullOk = null;    // result of the last finished pull
 let _onPulledCb = null;
+let _cloudStarted = false;
 
-// Hard reset: wipe the local cache for all synced tables and re-pull from
-// Supabase (source of truth). Also clears any stale write-queue. Use this when a
-// device is out of sync. Returns the fresh candidate count.
-export async function forceResync() {
-  const { isConfigured } = await import('../auth/supabaseClient.js');
-  if (!isConfigured()) return null;
-  const { drainQueue, hasPendingWrites } = await import('./writeQueue.js');
+// Publish queue counts (and, when `pullOk` is given, the overall status) into
+// the sync signal. 'failed' = writes the server rejected (dead-letter) or that
+// keep failing (3+ attempts); 'error' = pull failed or a write couldn't be queued.
+function publishStatus(pullOk) {
+  if (!_wq) return;
+  const s = _wq.queueStatus();
+  const brief = ops => ops.map(o => ({ table: o.table, label: o.label, status: o.status, lastError: String(o.lastError || '').slice(0, 300) }));
+  const patch = {
+    pending: s.pending, failing: s.failing, deadLetter: s.deadLetter,
+    failingOps: brief(s.failingOps), deadLetterOps: brief(s.deadLetterOps),
+    writeError: _writeError ? _writeError.message : null,
+  };
+  if (pullOk === false) Object.assign(patch, { status: 'error', error: 'Could not load the latest data from the server.' });
+  else if (pullOk === true) {
+    if (_writeError) Object.assign(patch, { status: 'error', error: _writeError.message });
+    else if (s.deadLetter || s.failing) Object.assign(patch, { status: 'failed', error: null });
+    else if (s.pending) Object.assign(patch, { status: 'pending', error: null });
+    else Object.assign(patch, { status: 'synced', error: null });
+  }
+  setSyncStatus(patch);
+}
+
+async function runCycle() {
+  const W = await wq();
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    publishStatus();
+    setSyncStatus({ status: 'offline' });
+    return;
+  }
   setSyncStatus({ status: 'syncing' });
-  // Push any pending local writes first so we don't lose them, THEN wipe the
-  // cache and mirror the server. (We do NOT delete the queue — pending writes
-  // are preserved and reconciled by pullAll.)
-  try { await drainQueue(); } catch {}
-  try { for (const lsKey of Object.keys(SYNC)) localStorage.removeItem(lsKey); } catch {}
-  const ok = await backend.pullAll();
-  // Real server data is now in the cache — run the one-time name backfill (it
-  // self-guards, so this is a no-op once it has run against real data).
-  if (ok) { try { maybeBackfillNames(); } catch (e) { console.warn('[backfill] failed', e); } }
-  // Awaited so the first screen after boot already shows the corrected scores.
-  if (ok) await maybeRescoreRules(true);
-  const pending = hasPendingWrites();
-  setSyncStatus({ status: !ok ? 'error' : (pending ? 'pending' : 'synced'), lastSync: new Date().toISOString() });
-  if (_onPulledCb) _onPulledCb();
+  let ok = false, res = null;
+  try {
+    try { await W.drainQueue(); } catch (e) { console.warn('[sync] upload failed', e); }  // push local changes up first
+    res = await backend.pullAll();                                                         // then mirror server down
+    ok = res.ok;
+    // A table that now answers was missing before: re-queue the writes that
+    // dead-lettered with 404 because of it (e.g. blackball entries).
+    const moved = W.retryDeadLetterWhere(op => op.status === 404 && res.reachable.has(op.table));
+    if (moved) { console.log('[sync] re-queued', moved, 'write(s) for tables that now exist'); await W.drainQueue(); }
+    if (ok) {
+      afterFirstPull(res);
+    }
+  } catch (e) {
+    console.warn('[sync] cycle failed', e);
+    ok = false;
+  } finally {
+    _lastPullOk = ok;
+    publishStatus(ok);
+    if (ok) setSyncStatus({ lastSync: new Date().toISOString() });
+  }
+  if (_onPulledCb && res) { try { _onPulledCb({ changed: !!res.changed }); } catch (e) { console.warn('[sync] refresh failed', e); } }
+}
+
+// Run one full sync cycle: push the queue, then pull from Supabase (source of
+// truth). If a cycle is already running, returns (and waits on) that one.
+export function syncNow() {
+  if (!isCloud()) { setSyncStatus({ status: 'local' }); return Promise.resolve(); }
+  if (_cycleP) return _cycleP;
+  _cycleP = runCycle().finally(() => { _cycleP = null; });
+  return _cycleP;
+}
+
+// Full re-sync on demand (boot, login, chip double-click). The cloud cache is
+// memory-only and pending writes are overlaid by the pull, so this no longer
+// wipes anything: it waits for any running cycle, then uploads + pulls fresh.
+// Returns the candidate count.
+export async function forceResync() {
+  if (!isCloud()) return null;
+  if (_cycleP) { try { await _cycleP; } catch {} }
+  await syncNow();
   const n = (backend.read(KEYS.candidates) || []).length;
   console.log('[sync] forceResync complete — candidates now:', n);
   return n;
 }
 
-// Run one full sync cycle: push the queue, then pull from Supabase (source of
-// truth). Updates the status signal throughout. Safe to call manually.
-export async function syncNow() {
-  const { isConfigured } = await import('../auth/supabaseClient.js');
-  if (!isConfigured()) { setSyncStatus({ status: 'local' }); return; }
-  if (_syncing) return;
-  _syncing = true;
-  const { drainQueue, hasPendingWrites, queueStatus } = await import('./writeQueue.js');
-  try {
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-      setSyncStatus({ status: 'offline', pending: queueStatus().pending });
-      return;
-    }
-    setSyncStatus({ status: 'syncing' });
-    await drainQueue();                       // push local changes up first
-    const ok = await backend.pullAll();       // then mirror server down
-    // One-time name backfill, once real data is present (self-guarded no-op).
-    if (ok) { try { maybeBackfillNames(); } catch (e) { console.warn('[backfill] failed', e); } }
-    if (ok) await maybeRescoreRules(true);
-    const pending = queueStatus().pending;
-    if (!ok) setSyncStatus({ status: 'error', pending });
-    else if (pending > 0 || hasPendingWrites()) setSyncStatus({ status: 'pending', pending });
-    else setSyncStatus({ status: 'synced', pending: 0, lastSync: new Date().toISOString() });
-    if (_onPulledCb) _onPulledCb();
-  } catch (e) {
-    console.warn('[sync] cycle failed', e);
-    setSyncStatus({ status: 'error' });
-  } finally {
-    _syncing = false;
-  }
+// Chip action when writes failed: move dead-letter ops back into the queue,
+// clear the "couldn't queue" flag, and sync.
+export async function retryFailedWrites() {
+  _writeError = null;
+  const W = await wq();
+  W.retryDeadLetter();
+  return syncNow();
 }
 
+// Call once after initDB(). Starts the durable write-queue worker and polls
+// periodically so other devices' changes appear. `onPulled({changed})` runs
+// after every pull. Extra calls only update the callback.
 export async function initCloudSync(onPulled) {
-  const { isConfigured } = await import('../auth/supabaseClient.js');
-  if (!isConfigured()) { setSyncStatus({ status: 'local' }); return; }
-  _onPulledCb = onPulled;
-  const { startQueueWorker } = await import('./writeQueue.js');
-  startQueueWorker(5000);
+  if (!isCloud()) { setSyncStatus({ status: 'local' }); return; }
+  if (onPulled) _onPulledCb = onPulled;
+  if (_cloudStarted) return;
+  _cloudStarted = true;
+  const W = await wq();
+  // Keep the chip's counts live between cycles (dead-letter, pending, failing).
+  W.onQueueChange(() => publishStatus(_cycleP || _lastPullOk == null ? undefined : _lastPullOk));
+  W.startQueueWorker(5000);
   await syncNow();                            // initial sync
   setInterval(syncNow, 15000);                // periodic source-of-truth refresh
   if (typeof window !== 'undefined') window.addEventListener('online', syncNow);
@@ -863,8 +1021,7 @@ export const AIConfig = {
       const rows = await r.sbSelect('app_kv');
       if (!Array.isArray(rows)) return this.get();      // fetch failed — keep cache
       const row = rows.find(x => x.key === 'ai_config');
-      if (row && row.value != null) localStorage.setItem(KEYS.aiConfig, JSON.stringify(row.value));
-      else localStorage.removeItem(KEYS.aiConfig);      // never set → default (off)
+      backend.put(KEYS.aiConfig, row && row.value != null ? row.value : null);   // never set → default (off)
     } catch (e) { console.warn('[ai] refresh failed, using cached setting', e); }
     return this.get();
   },

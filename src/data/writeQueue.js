@@ -11,7 +11,7 @@ const QUEUE_KEY = 'rst_write_queue';
 const DEAD_KEY = 'rst_write_deadletter';
 const MAX_ATTEMPTS_BEFORE_ALERT = 3;
 
-let draining = false;
+let draining = null;   // in-flight drain promise (null when idle)
 const listeners = new Set();
 
 function loadQueue() {
@@ -40,16 +40,28 @@ function statusSnapshot() {
 }
 function notify() { const s = statusSnapshot(); listeners.forEach(fn => { try { fn(s); } catch {} }); }
 export function queueStatus() { return statusSnapshot(); }
-export function retryDeadLetter() {
-  const d = loadDead(); if (!d.length) return;
-  const q = loadQueue(); d.forEach(op => q.push({ ...op, attempts: 0, lastError: null }));
-  saveQueue(q); saveDead([]); notify(); drainQueue();
+export function retryDeadLetter() { return retryDeadLetterWhere(() => true); }
+// Move only the dead-letter ops matching `pred` back into the queue (e.g. ops
+// that failed with 404 because their table didn't exist yet). Returns how many
+// ops were moved.
+export function retryDeadLetterWhere(pred) {
+  const d = loadDead(); if (!d.length) return 0;
+  const move = d.filter(op => { try { return pred(op); } catch { return false; } });
+  if (!move.length) return 0;
+  const keep = d.filter(op => !move.includes(op));
+  const q = loadQueue();
+  move.forEach(op => {
+    const { failedAt, status, ...rest } = op;
+    q.push({ ...rest, attempts: 0, lastError: null });
+  });
+  saveQueue(q); saveDead(keep); notify(); drainQuietly();
+  return move.length;
 }
 
 export function enqueue(op) {
   const q = loadQueue();
   q.push({ id: uid(), attempts: 0, lastError: null, queuedAt: new Date().toISOString(), ...op });
-  saveQueue(q); notify(); drainQueue();
+  saveQueue(q); notify(); drainQuietly();
 }
 export function enqueueUpsert(table, rows, label) { if (rows && rows.length) enqueue({ type: 'upsert', table, rows, label: label || table }); }
 export function enqueueDelete(table, id, col = 'id', label) { enqueue({ type: 'delete', table, id, col, label: label || `${table}/${id}` }); }
@@ -67,36 +79,43 @@ async function attempt(op) {
   } catch (e) { return { ok: false, permanent: false, error: e.message }; }
 }
 
-export async function drainQueue() {
-  if (draining) return;
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-  draining = true;
-  try {
-    const order = loadQueue().map(o => o.id);
-    const blocked = new Set();
-    for (const opId of order) {
-      let q = loadQueue();
-      const op = q.find(o => o.id === opId);
-      if (!op) continue;
-      const key = opKey(op);
-      if (blocked.has(key)) continue;           // preserve per-record order
-      const res = await attempt(op);
-      q = loadQueue();
-      const idx = q.findIndex(o => o.id === opId);
-      if (idx < 0) continue;
-      if (res.ok) { q.splice(idx, 1); saveQueue(q); notify(); }
-      else if (res.permanent) { const dead = q.splice(idx, 1)[0]; saveQueue(q); pushDead(dead, res); notify(); }
-      else { q[idx].attempts = (q[idx].attempts || 0) + 1; q[idx].lastError = res.error; saveQueue(q); notify(); blocked.add(key); }
-    }
-  } finally { draining = false; }
+// If a drain is already running, callers get THAT promise, so
+// `await drainQueue()` really waits for the in-flight upload to finish.
+export function drainQueue() {
+  if (draining) return draining;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return Promise.resolve();
+  draining = runDrain().finally(() => { draining = null; });
+  return draining;
+}
+
+async function runDrain() {
+  const order = loadQueue().map(o => o.id);
+  const blocked = new Set();
+  for (const opId of order) {
+    let q = loadQueue();
+    const op = q.find(o => o.id === opId);
+    if (!op) continue;
+    const key = opKey(op);
+    if (blocked.has(key)) continue;           // preserve per-record order
+    const res = await attempt(op);
+    q = loadQueue();
+    const idx = q.findIndex(o => o.id === opId);
+    if (idx < 0) continue;
+    if (res.ok) { q.splice(idx, 1); saveQueue(q); notify(); }
+    // Dead-letter first, then drop from the queue: if storage is full the op
+    // stays queued instead of being lost between the two saves.
+    else if (res.permanent) { pushDead(q[idx], res); q.splice(idx, 1); saveQueue(q); notify(); }
+    else { q[idx].attempts = (q[idx].attempts || 0) + 1; q[idx].lastError = res.error; saveQueue(q); notify(); blocked.add(key); }
+  }
 }
 
 let worker = null;
+const drainQuietly = () => drainQueue().catch(e => console.warn('[queue] drain failed', e));
 export function startQueueWorker(ms = 5000) {
   if (worker) clearInterval(worker);
-  worker = setInterval(drainQueue, ms);
-  if (typeof window !== 'undefined') window.addEventListener('online', drainQueue);
-  drainQueue();
+  worker = setInterval(drainQuietly, ms);
+  if (typeof window !== 'undefined') window.addEventListener('online', drainQuietly);
+  drainQuietly();
 }
 export function hasPendingWrites() { return loadQueue().length > 0; }
 
@@ -112,4 +131,11 @@ export function pendingRecordIds() {
   };
   loadQueue().forEach(add); loadDead().forEach(add);
   return map;
+}
+
+// Every op that hasn't reached the server (dead-letter + queue), oldest first,
+// so the pull can overlay the pending row data on top of the server copy.
+export function pendingOps() {
+  const all = [...loadDead(), ...loadQueue()];
+  return all.sort((a, b) => String(a.queuedAt || '').localeCompare(String(b.queuedAt || '')));
 }
