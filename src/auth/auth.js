@@ -10,6 +10,15 @@
  */
 import { getConfig, isConfigured, loadConfig } from './supabaseClient.js';
 import { sanitizeForDb } from '../data/sbRest.js';
+import { enqueueInsert } from '../data/writeQueue.js';
+import { AUDIT_TABLE, auditRow, safeUser } from '../data/audit.js';
+
+// Activity log (sign-ins, user changes). Through the durable queue; never throws.
+function logAuth(by, fields) {
+  if (!isConfigured()) return;
+  try { enqueueInsert(AUDIT_TABLE, [auditRow(by, { entity: 'app_users', ...fields })], AUDIT_TABLE); }
+  catch (e) { console.warn('[audit] auth row skipped', e); }
+}
 
 const LS_USERS = 'rst_users';
 const LS_CURRENT = 'rst_current_user';
@@ -109,12 +118,24 @@ export function signIn(username, password) {
   const user = users.find(u =>
     String(u.username || '').toLowerCase() === uname &&
     u.passwordHash === hashPassword(password));
-  if (!user) throw new Error('Incorrect username or password.');
-  if (user.status === 'disabled') throw new Error('This account is disabled.');
+  const typed = String(username || '').trim().slice(0, 80);
+  if (!user) {
+    logAuth({ id: '', name: typed }, { action: 'login_failed', summary: `failed sign-in as "${typed}"` });
+    throw new Error('Incorrect username or password.');
+  }
+  if (user.status === 'disabled') {
+    logAuth({ id: '', name: typed }, { action: 'login_failed', entityId: user.id, summary: `sign-in refused for "${typed}" (account disabled)` });
+    throw new Error('This account is disabled.');
+  }
   lsSave(LS_CURRENT, user);
+  logAuth(user, { action: 'login', entityId: user.id, summary: `${user.name || user.username} signed in` });
   return user;
 }
-export function signOut() { localStorage.removeItem(LS_CURRENT); }
+export function signOut() {
+  const me = currentUser();
+  if (me) logAuth(me, { action: 'logout', entityId: me.id, summary: `${me.name || me.username} signed out` });
+  localStorage.removeItem(LS_CURRENT);
+}
 
 export function changeOwnPassword(newPassword) {
   const me = currentUser();
@@ -143,6 +164,7 @@ export const Users = {
         list[i] = { ...existing, name: name || existing.name, role: role === 'admin' ? 'admin' : 'user',
           passwordHash: hashPassword(password), passwordPlain: password, status: 'active' };
         lsSave(LS_USERS, list); sbUpsertUser(list[i]);
+        logAuth(currentUser(), { action: 'update', entityId: list[i].id, summary: `reactivated user ${list[i].username} (${list[i].role})`, before: safeUser(existing), after: safeUser(list[i]) });
         return Promise.resolve(list[i]);
       }
       throw new Error('That username is taken.');
@@ -150,6 +172,7 @@ export const Users = {
     const u = { id: uid(), username: uname, name: name || uname, role: role === 'admin' ? 'admin' : 'user',
       passwordHash: hashPassword(password), passwordPlain: password, status: 'active' };
     list.push(u); lsSave(LS_USERS, list); sbUpsertUser(u);
+    logAuth(currentUser(), { action: 'create', entityId: u.id, summary: `created user ${u.username} (${u.role})`, after: safeUser(u) });
     return Promise.resolve(u);
   },
   resetPassword(id, newPassword) { return Promise.resolve(this.changePassword(id, newPassword)); },
@@ -159,6 +182,7 @@ export const Users = {
     if (i < 0) return null;
     list[i] = { ...list[i], passwordHash: hashPassword(newPassword), passwordPlain: newPassword };
     lsSave(LS_USERS, list); sbUpsertUser(list[i]);
+    logAuth(currentUser(), { action: 'update', entityId: id, summary: `password changed for ${list[i].username}` });
     return list[i];
   },
   setRole(id, role) {
@@ -169,7 +193,9 @@ export const Users = {
     if (role !== 'admin' && list.filter(u => u.role === 'admin').length <= 1 && list[i].role === 'admin') {
       return Promise.reject(new Error("Can't demote the last admin."));
     }
+    const before = list[i];
     list[i] = { ...list[i], role }; lsSave(LS_USERS, list); sbUpsertUser(list[i]);
+    logAuth(currentUser(), { action: 'update', entityId: id, summary: `role changed for ${before.username}: ${before.role} → ${role}`, before: safeUser(before), after: safeUser(list[i]) });
     return Promise.resolve(list[i]);
   },
   remove(id) {
@@ -186,6 +212,7 @@ export const Users = {
     const next = list.filter(u => u.id !== id);
     lsSave(LS_USERS, next);
     sbDeleteUser(id);
+    logAuth(me, { action: 'delete', entityId: id, summary: `removed user ${list[i].username}`, before: safeUser(list[i]) });
     return Promise.resolve();
   },
 };

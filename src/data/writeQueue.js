@@ -5,7 +5,7 @@
  * never be stuck "local only" (worst case: pending, will sync). Permanent (4xx)
  * failures go to a dead-letter instead of blocking the queue forever.
  */
-import { sbUpsert, sbDelete } from './sbRest.js';
+import { sbUpsert, sbDelete, sbInsert } from './sbRest.js';
 
 const QUEUE_KEY = 'rst_write_queue';
 const DEAD_KEY = 'rst_write_deadletter';
@@ -65,9 +65,12 @@ export function enqueue(op) {
 }
 export function enqueueUpsert(table, rows, label) { if (rows && rows.length) enqueue({ type: 'upsert', table, rows, label: label || table }); }
 export function enqueueDelete(table, id, col = 'id', label) { enqueue({ type: 'delete', table, id, col, label: label || `${table}/${id}` }); }
+// Append-only rows (audit_log): plain INSERT, never merged, never overlaid by a pull.
+export function enqueueInsert(table, rows, label) { if (rows && rows.length) enqueue({ type: 'insert', table, rows, label: label || table }); }
 
 function opKey(op) {
   if (op.type === 'delete') return `${op.table}|${op.id}`;
+  if (op.type === 'insert') return `${op.table}|${op.id}`;   // independent: never blocks other ops
   const id = op.rows && op.rows[0] && (op.rows[0].id ?? op.rows[0].key);
   return `${op.table}|${id}`;
 }
@@ -75,6 +78,7 @@ async function attempt(op) {
   try {
     if (op.type === 'upsert') return await sbUpsert(op.table, op.rows);
     if (op.type === 'delete') return await sbDelete(op.table, op.id, op.col);
+    if (op.type === 'insert') return await sbInsert(op.table, op.rows);
     return { ok: true };
   } catch (e) { return { ok: false, permanent: false, error: e.message }; }
 }

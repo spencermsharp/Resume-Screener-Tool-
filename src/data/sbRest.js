@@ -71,6 +71,39 @@ export async function sbUpsert(table, rows) {
   } catch (e) { return { ok: false, permanent: false, error: e.message }; }
 }
 
+// Plain INSERT (no merge): for append-only tables like audit_log.
+export async function sbInsert(table, rows) {
+  if (!isConfigured()) return { ok: false, permanent: false, error: 'not configured' };
+  if (!rows || !rows.length) return { ok: true };
+  const { supabaseUrl } = getConfig();
+  try {
+    const r = await fetch(`${supabaseUrl}/rest/v1/${table}`, {
+      method: 'POST',
+      headers: { ...headers(), Prefer: 'return=minimal' },
+      body: JSON.stringify(sanitizeForDb(rows)),
+    });
+    if (!r.ok) {
+      const err = await r.text();
+      return { ok: false, status: r.status, permanent: isPermanentStatus(r.status), error: err };
+    }
+    return { ok: true, status: r.status };
+  } catch (e) { return { ok: false, permanent: false, error: e.message }; }
+}
+
+// Read with a PostgREST query string (e.g. 'select=*&order=at.desc&limit=100').
+// Same return contract as sbSelect: rows | TABLE_MISSING | null.
+export async function sbQuery(table, query) {
+  if (!isConfigured()) return null;
+  const { supabaseUrl } = getConfig();
+  try {
+    const r = await fetch(`${supabaseUrl}/rest/v1/${table}?${query}`, { headers: headers() });
+    if (r.status === 404) return TABLE_MISSING;
+    if (!r.ok) { console.error(`[sb] query ${table} failed ${r.status}`); return null; }
+    const rows = await r.json();
+    return Array.isArray(rows) ? rows : null;
+  } catch (e) { console.error(`[sb] query ${table} error`, e); return null; }
+}
+
 export async function sbDelete(table, id, col = 'id') {
   if (!isConfigured()) return { ok: false, permanent: false, error: 'not configured' };
   const { supabaseUrl } = getConfig();

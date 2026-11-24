@@ -18,6 +18,8 @@
 import { uid, today } from '../utils.js';
 import { lightStructure, nameFromFileName } from './parser.js';
 import { loadConfig, isConfigured } from '../auth/supabaseClient.js';
+import { currentUser } from '../auth/auth.js';
+import { AUDIT_TABLE, collectionAuditRows, kvAuditRow } from './audit.js';
 
 const KEYS = {
   profiles: 'qrs_profiles',
@@ -87,6 +89,18 @@ function isCloud() {
   return _cloud;
 }
 
+// Activity log: bulk/one-time jobs (migrations, seeding) run inside
+// withoutAudit() so only real user changes are logged.
+let _auditMuted = 0;
+function withoutAudit(fn) { _auditMuted++; try { return fn(); } finally { _auditMuted--; } }
+// Audit must never break a save: any error here only skips the log row.
+function queueAudit(enqueueInsert, build) {
+  try {
+    const rows = build().filter(Boolean);
+    if (rows.length) enqueueInsert(AUDIT_TABLE, rows, AUDIT_TABLE);
+  } catch (e) { console.warn('[audit] row skipped', e); }
+}
+
 function isQuotaError(e) {
   return !!e && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22 || e.code === 1014);
 }
@@ -123,10 +137,14 @@ const backend = {
   async _sync(key, value, prev) {
     const cfg = SYNC[key];
     if (!cfg) return;
+    // Read before any await: whether this is a logged change, and by whom.
+    const audit = !_auditMuted;
+    const who = audit ? currentUser() : null;
     try {
-      const { enqueueUpsert, enqueueDelete } = _wq || await wq();
+      const { enqueueUpsert, enqueueDelete, enqueueInsert } = _wq || await wq();
       if (cfg.kind === 'kv') {
         enqueueUpsert('app_kv', [{ key: cfg.kvKey, value, updated_at: new Date().toISOString() }], `kv:${cfg.kvKey}`);
+        if (audit) queueAudit(enqueueInsert, () => [kvAuditRow(cfg.kvKey, prev, value, who)]);
         setSyncStatus({ status: 'syncing' });
         return;
       }
@@ -137,6 +155,13 @@ const backend = {
       const changed = [];
       const prevById = {};
       prevList.forEach(x => { prevById[String(x.id)] = x; });
+      // Activity rows, built before the _rev stamps below touch the records.
+      let auditRows = [];
+      if (audit) {
+        try {
+          auditRows = collectionAuditRows(cfg.table, prevById, list, prevList.filter(x => !nextIds.has(String(x.id))), who, id => Stages.label(id));
+        } catch (e) { console.warn('[audit] rows skipped', e); }
+      }
       const stamp = new Date().toISOString();
       for (const item of list) {
         const before = prevById[String(item.id)];
@@ -156,6 +181,7 @@ const backend = {
       for (const old of prevList) {
         if (!nextIds.has(String(old.id))) { enqueueDelete(cfg.table, String(old.id), 'id', cfg.table); touched = true; }
       }
+      if (auditRows.length) queueAudit(enqueueInsert, () => auditRows);
       if (touched) setSyncStatus({ status: 'syncing' });
     } catch (e) {
       // Surface it: a write that couldn't be queued will never reach the server.
@@ -575,14 +601,16 @@ export function initDB() {
   }
 
   // Local-only mode: localStorage is the data, so seed + migrate right here.
-  if (backend.read(KEYS.profiles) == null) backend.write(KEYS.profiles, SEED_PROFILES);
-  if (backend.read(KEYS.candidates) == null) backend.write(KEYS.candidates, []);
-  if (backend.read(KEYS.stages) == null) backend.write(KEYS.stages, DEFAULT_STAGES);
-  if (backend.read(KEYS.blacklist) == null) backend.write(KEYS.blacklist, []);
-  if (backend.read(KEYS.companies) == null) backend.write(KEYS.companies, []);
-  if (backend.read(KEYS.placements) == null) backend.write(KEYS.placements, []);
-  if (backend.read(KEYS.people) == null) backend.write(KEYS.people, []);
-  runDataMigrations();
+  withoutAudit(() => {
+    if (backend.read(KEYS.profiles) == null) backend.write(KEYS.profiles, SEED_PROFILES);
+    if (backend.read(KEYS.candidates) == null) backend.write(KEYS.candidates, []);
+    if (backend.read(KEYS.stages) == null) backend.write(KEYS.stages, DEFAULT_STAGES);
+    if (backend.read(KEYS.blacklist) == null) backend.write(KEYS.blacklist, []);
+    if (backend.read(KEYS.companies) == null) backend.write(KEYS.companies, []);
+    if (backend.read(KEYS.placements) == null) backend.write(KEYS.placements, []);
+    if (backend.read(KEYS.people) == null) backend.write(KEYS.people, []);
+    runDataMigrations();
+  });
   // The one-time name backfill and rules re-score have already run against
   // production. They are no longer called: their done-flags are per-device,
   // so every new browser would otherwise re-run them and silently rewrite
@@ -594,12 +622,12 @@ let _postPullDone = false;
 function afterFirstPull(res) {
   if (_postPullDone) return;
   _postPullDone = true;
-  const did = runDataMigrations();
+  const did = withoutAudit(runDataMigrations);
   if (did.length) console.log('[migrate] uploaded changes:', did);
   // Seed the sample position only if the server genuinely has no positions
   // (and nothing is pending for that table).
   if (res.empty.has('positions') && !Profiles.all().length) {
-    backend.write(KEYS.profiles, JSON.parse(JSON.stringify(SEED_PROFILES)));
+    withoutAudit(() => backend.write(KEYS.profiles, JSON.parse(JSON.stringify(SEED_PROFILES))));
     console.log('[seed] server had no positions — seeded', SEED_PROFILES[0].id);
   }
 }
@@ -895,9 +923,15 @@ let _cloudStarted = false;
 // Publish queue counts (and, when `pullOk` is given, the overall status) into
 // the sync signal. 'failed' = writes the server rejected (dead-letter) or that
 // keep failing (3+ attempts); 'error' = pull failed or a write couldn't be queued.
+// Activity rows parked because public.audit_log doesn't exist yet (HTTP 404).
+// They go up on their own once it does, so they're not shown as failed saves.
+const isAuditWaiting = op => op.table === AUDIT_TABLE && op.status === 404;
+
 function publishStatus(pullOk) {
   if (!_wq) return;
-  const s = _wq.queueStatus();
+  const s = { ..._wq.queueStatus() };
+  s.deadLetterOps = s.deadLetterOps.filter(op => !isAuditWaiting(op));
+  s.deadLetter = s.deadLetterOps.length;
   const brief = ops => ops.map(o => ({ table: o.table, label: o.label, status: o.status, lastError: String(o.lastError || '').slice(0, 300) }));
   const patch = {
     pending: s.pending, failing: s.failing, deadLetter: s.deadLetter,
@@ -929,6 +963,12 @@ async function runCycle() {
     try { await W.drainQueue(); } catch (e) { console.warn('[sync] upload failed', e); }  // push local changes up first
     res = await backend.pullAll();                                                         // then mirror server down
     ok = res.ok;
+    // The activity log is never pulled, so check it separately (one tiny read,
+    // only while activity rows are waiting for the table to be created).
+    if (W.queueStatus().deadLetterOps.some(isAuditWaiting)) {
+      const probe = await (await rest()).sbQuery(AUDIT_TABLE, 'select=id&limit=1');
+      if (Array.isArray(probe)) res.reachable.add(AUDIT_TABLE);
+    }
     // A table that now answers was missing before: re-queue the writes that
     // dead-lettered with 404 because of it (e.g. blackball entries).
     const moved = W.retryDeadLetterWhere(op => op.status === 404 && res.reachable.has(op.table));

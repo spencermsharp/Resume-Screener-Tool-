@@ -11,6 +11,7 @@ import { renderCompanies } from './views/companies.js';
 import { renderPlacements } from './views/placements.js';
 import { renderFutureFit } from './views/futurefit.js';
 import { renderTeam } from './views/team.js';
+import { renderActivity } from './views/activity.js';
 import { renderLogin } from './views/login.js';
 import { initAuth, needsLogin, isAdmin, isAuthed, currentUser, signOut } from './auth/auth.js';
 import { isConfigured } from './auth/supabaseClient.js';
@@ -45,6 +46,7 @@ function tabsForWorkspace(ws) {
 function globalTabs() {
   const t = [...GLOBAL_TABS];
   t.push(isAdmin() ? { id: 'team', label: 'Team' } : { id: 'team', label: 'Account' });
+  if (isAdmin()) t.push({ id: 'activity', label: 'Activity' });
   return t;
 }
 // All valid tab ids for the current workspace (for route validation).
@@ -73,6 +75,7 @@ function viewFor(route, arg) {
     case 'blacklist':  return renderBlacklist(navigate);
     case 'stages':     return renderStages(navigate);
     case 'team':       return renderTeam(navigate);
+    case 'activity':   return renderActivity(navigate);
     default:           return renderDashboard(navigate);
   }
 }
