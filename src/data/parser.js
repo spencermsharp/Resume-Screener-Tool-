@@ -131,10 +131,15 @@ async function extractPdfText(file) {
   return normalizeExtractedText(pages.join('\n\n'));
 }
 
-// Shared cleanup for every extracted (non-.txt) format: drop trailing spaces
-// before newlines and trim the ends.
+// C0 control chars except \t \n \r. U+0000 in particular makes Postgres reject
+// the row (22P05), so no extracted text may contain them.
+const C0_CONTROLS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g;
+export function stripControlChars(text) { return String(text || '').replace(C0_CONTROLS, ''); }
+
+// Shared cleanup for every extracted (non-.txt) format: strip control chars,
+// drop trailing spaces before newlines and trim the ends.
 export function normalizeExtractedText(text) {
-  return String(text || '').replace(/[ \t]+\n/g, '\n').trim();
+  return stripControlChars(text).replace(/[ \t]+\n/g, '\n').trim();
 }
 
 // Word libraries are UMD/classic-script builds (no ES module export), so they
@@ -361,7 +366,7 @@ export async function extractText(file) {
   }
 
   if (isTxt) {
-    const rawText = await file.text();
+    const rawText = stripControlChars(await file.text());
     return { ok: true, rawText, needsRealParser: false };
   }
 

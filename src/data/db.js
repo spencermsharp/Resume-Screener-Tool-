@@ -914,6 +914,8 @@ function publishStatus(pullOk) {
   setSyncStatus(patch);
 }
 
+export function isNulRejected(op) { return op.status === 400 && String(op.lastError || '').includes('22P05'); }
+
 async function runCycle() {
   const W = await wq();
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
@@ -932,6 +934,10 @@ async function runCycle() {
     const moved = W.retryDeadLetterWhere(op => op.status === 404 && res.reachable.has(op.table));
     if (moved) { console.log('[sync] re-queued', moved, 'write(s) for tables that now exist'); await W.drainQueue(); }
     if (ok) {
+      // Writes rejected for NUL chars (22P05) now go through the send-side
+      // sanitizer, so retry them. Idempotent: they leave the dead-letter on success.
+      const fixed = W.retryDeadLetterWhere(isNulRejected);
+      if (fixed) { console.log('[sync] re-queued', fixed, 'write(s) rejected for NUL characters'); await W.drainQueue(); }
       afterFirstPull(res);
     }
   } catch (e) {

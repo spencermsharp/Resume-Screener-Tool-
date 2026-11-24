@@ -37,6 +37,22 @@ export async function sbSelect(table) {
   } catch (e) { console.error(`[sb] select ${table} error`, e); return null; }
 }
 
+// Postgres text/jsonb rejects U+0000 (error 22P05) and unpaired UTF-16
+// surrogates. Strip them from every string (and object key) in a deep copy,
+// working on JS values so a literal "\u0000" typed in text is left alone.
+const BAD_CHARS = /\u0000|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+export function sanitizeForDb(v) {
+  if (typeof v === 'string') return v.replace(BAD_CHARS, '');
+  if (Array.isArray(v)) return v.map(sanitizeForDb);
+  if (v && typeof v === 'object') {
+    if (typeof v.toJSON === 'function') return sanitizeForDb(v.toJSON());
+    const out = {};
+    for (const [k, val] of Object.entries(v)) out[k.replace(BAD_CHARS, '')] = sanitizeForDb(val);
+    return out;
+  }
+  return v;
+}
+
 export async function sbUpsert(table, rows) {
   if (!isConfigured()) return { ok: false, permanent: false, error: 'not configured' };
   if (!rows || !rows.length) return { ok: true };
@@ -45,7 +61,7 @@ export async function sbUpsert(table, rows) {
     const r = await fetch(`${supabaseUrl}/rest/v1/${table}`, {
       method: 'POST',
       headers: { ...headers(), Prefer: 'resolution=merge-duplicates,return=minimal' },
-      body: JSON.stringify(rows),
+      body: JSON.stringify(sanitizeForDb(rows)),
     });
     if (!r.ok) {
       const err = await r.text();

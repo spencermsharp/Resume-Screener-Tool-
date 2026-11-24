@@ -9,6 +9,7 @@
  * Roles: 'admin' | 'user'. Admin's only extra power is managing users.
  */
 import { getConfig, isConfigured, loadConfig } from './supabaseClient.js';
+import { sanitizeForDb } from '../data/sbRest.js';
 
 const LS_USERS = 'rst_users';
 const LS_CURRENT = 'rst_current_user';
@@ -57,7 +58,7 @@ async function sbUpsertUser(u) {
   const { supabaseUrl } = getConfig();
   try {
     await fetch(`${supabaseUrl}/rest/v1/app_users`, {
-      method: 'POST', headers: headers(), body: JSON.stringify([toRow(u)]),
+      method: 'POST', headers: headers(), body: JSON.stringify(sanitizeForDb([toRow(u)])),
     });
   } catch { /* best effort; cached locally regardless */ }
 }
